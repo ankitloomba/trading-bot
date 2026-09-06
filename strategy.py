@@ -8,7 +8,7 @@ class BreakoutStrategy:
         self.trades = []
 
     def calculate_rsi(self, df, period=14):
-        return ta.momentum.rsi(df['Close'], length=period)
+        return ta.momentum.RSIIndicator(df['Close'], window=period).rsi()
 
     def calculate_volume_ratio(self, df, period=20):
         return df['Volume'] / df['Volume'].rolling(window=period).mean()
