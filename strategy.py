@@ -18,7 +18,6 @@ class BreakoutStrategy:
     def backtest(self, df):
         closes = pd.Series(df['Close'].values.flatten(), index=df.index)
         highs = pd.Series(df['High'].values.flatten(), index=df.index)
-        volumes = pd.Series(df['Volume'].values.flatten(), index=df.index)
         trades = []
         position = None
         entry_price = None
@@ -30,9 +29,7 @@ class BreakoutStrategy:
                 price_breakout = current_close > prev_high
                 rsi = self.calculate_rsi(closes.iloc[:i+1])
                 rsi_val = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
-                vol_avg = float(volumes.iloc[i-BREAKOUT_PERIODS:i].mean())
-                vol_ratio = float(volumes.iloc[i]) / vol_avg if vol_avg > 0 else 0
-                if price_breakout and rsi_val < RSI_OVERBOUGHT and vol_ratio > MIN_VOLUME_RATIO:
+                if price_breakout and rsi_val < RSI_OVERBOUGHT:
                     position = 'LONG'
                     entry_price = current_close
                     entry_time = closes.index[i]
