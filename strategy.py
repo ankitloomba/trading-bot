@@ -29,7 +29,8 @@ class BreakoutStrategy:
                 price_breakout = current_close > prev_high
                 rsi = self.calculate_rsi(closes.iloc[:i+1])
                 rsi_val = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
-                if price_breakout and rsi_val < RSI_OVERBOUGHT:
+                rsi_valid = RSI_OVERSOLD < rsi_val < RSI_OVERBOUGHT
+                if price_breakout and rsi_valid:
                     position = 'LONG'
                     entry_price = current_close
                     entry_time = closes.index[i]
