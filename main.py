@@ -1,13 +1,22 @@
-from backtest_3day import main as run_backtest
-from db import setup_db, log_trade, log_daily_summary
-from datetime import date
+import os
+from datetime import datetime
+import pytz
 
-print("Setting up database...")
+IST = pytz.timezone('Asia/Kolkata')
+now = datetime.now(IST)
+
+print("="*60)
+print("  TRADING BOT v2 - ADAPTIVE + A/B TEST")
+print("  {}".format(now.strftime('%Y-%m-%d %H:%M:%S IST')))
+print("="*60)
+
 try:
+    from db import setup_db
     setup_db()
-    print("DB ready!")
+    print("Database: Ready")
 except Exception as e:
-    print("DB setup failed (running without DB): {}".format(e))
+    print("Database: Unavailable")
 
-print("\nRunning backtest...")
-run_backtest()
+from upstox_live_trader import AdaptiveTrader
+trader = AdaptiveTrader()
+trader.run()
