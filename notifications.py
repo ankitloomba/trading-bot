@@ -2,84 +2,80 @@ import os
 import requests
 from datetime import datetime
 
-BOT_NAME = "Intra Gini 🔥"
-
 class Notifier:
     def __init__(self):
-        self.webhook_url = os.environ.get('NOTIFICATION_WEBHOOK', '')
-        self.db_notify = True
-        print("Notifications: Web Push via PWA enabled")
+        self.token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+        self.chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+        self.enabled = bool(self.token and self.chat_id)
+        if self.enabled:
+            print("Notifications: Telegram enabled")
+        else:
+            print("Notifications: Telegram not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)")
 
-    def _write_notification(self, notif_type, title, body, data=None):
-        """Write notification to DB so PWA can push it to iPhone."""
+    def send(self, message):
+        if not self.enabled:
+            print("[NOTIFY] {}".format(message))
+            return
         try:
-            from db import get_connection
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute('''
-                CREATE TABLE IF NOT EXISTS notifications (
-                    id SERIAL PRIMARY KEY,
-                    type VARCHAR(50),
-                    title VARCHAR(200),
-                    body TEXT,
-                    data JSONB,
-                    read BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            ''')
-            import json
-            cur.execute(
-                'INSERT INTO notifications (type, title, body, data) VALUES (%s, %s, %s, %s)',
-                (notif_type, title, body, json.dumps(data or {}))
-            )
-            conn.commit()
-            cur.close()
-            conn.close()
-            print("[NOTIFY] {} - {}".format(title, body))
+            url = "https://api.telegram.org/bot{}/sendMessage".format(self.token)
+            requests.post(url, json={
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': 'HTML'
+            }, timeout=5)
         except Exception as e:
-            print("[NOTIFY] {} - {} (DB error: {})".format(title, body, e))
+            print("Notification error: {}".format(e))
 
-    def trade_open(self, symbol, price, score, capital, hard_stop):
-        self._write_notification(
-            'TRADE_OPEN',
-            '{} Bought {}'.format(BOT_NAME, symbol),
-            'Entry ₹{:,.0f} | Capital ₹{:,.0f} | Score {}/10'.format(price, capital, score),
-            {'symbol': symbol, 'price': price, 'capital': capital, 'score': score}
-        )
+    def trade_open(self, symbol, price, score, capital, target_stop):
+        msg = (
+            "🤖 <b>BOT BOUGHT</b>\n"
+            "Symbol: {}\n"
+            "Entry: ₹{:,.2f}\n"
+            "Capital: ₹{:,.0f}\n"
+            "Signal score: {}/10\n"
+            "Hard stop: ₹{:,.2f}\n"
+            "Time: {}"
+        ).format(symbol, price, capital, score,
+                 target_stop, datetime.now().strftime('%H:%M:%S'))
+        self.send(msg)
 
     def trade_close(self, symbol, entry, exit_p, pnl, reason, capital):
-        icon = '✅' if pnl >= 0 else '❌'
-        self._write_notification(
-            'TRADE_CLOSE',
-            '{} {} {}'.format(icon, BOT_NAME, 'Win!' if pnl >= 0 else 'Stop hit'),
-            '{:+.0f} P&L | {} → {} | {}'.format(pnl, entry, exit_p, reason),
-            {'symbol': symbol, 'pnl': pnl, 'reason': reason, 'capital': capital}
-        )
+        icon = "✅" if pnl >= 0 else "❌"
+        msg = (
+            "{} <b>BOT SOLD</b>\n"
+            "Symbol: {}\n"
+            "Entry: ₹{:,.2f} → Exit: ₹{:,.2f}\n"
+            "P&L: <b>{}</b>\n"
+            "Reason: {}\n"
+            "Capital now: ₹{:,.0f}\n"
+            "Time: {}"
+        ).format(icon, symbol, entry, exit_p,
+                 ('+' if pnl>=0 else '')+str(round(pnl,2)),
+                 reason, capital, datetime.now().strftime('%H:%M:%S'))
+        self.send(msg)
 
     def daily_summary(self, trades, capital, start_capital):
         wins = len([t for t in trades if t['pnl'] > 0])
         losses = len([t for t in trades if t['pnl'] <= 0])
         total_pnl = sum(t['pnl'] for t in trades)
-        self._write_notification(
-            'DAILY_SUMMARY',
-            '{} Day Summary'.format(BOT_NAME),
-            '{:+.0f} P&L | {}W {}L | Capital ₹{:,.0f}'.format(
-                total_pnl, wins, losses, capital),
-            {'pnl': total_pnl, 'wins': wins, 'losses': losses, 'capital': capital}
-        )
+        pct = (total_pnl / start_capital) * 100
+        msg = (
+            "📊 <b>DAILY SUMMARY</b>\n"
+            "Trades: {} (W:{} L:{})\n"
+            "Total P&L: {} ({:.1f}%)\n"
+            "Capital: ₹{:,.0f}\n"
+            "Date: {}"
+        ).format(len(trades), wins, losses,
+                 ('+' if total_pnl>=0 else '')+str(round(total_pnl,2)),
+                 pct, capital, datetime.now().strftime('%Y-%m-%d'))
+        self.send(msg)
 
     def crash_alert(self, error):
-        self._write_notification(
-            'CRASH',
-            '⚠️ {} Stopped'.format(BOT_NAME),
-            'Error: {}'.format(str(error)[:100]),
-            {'error': str(error)}
-        )
+        msg = "⚠️ <b>BOT STOPPED</b>\nError: {}\nTime: {}".format(
+            error, datetime.now().strftime('%H:%M:%S'))
+        self.send(msg)
 
     def market_open(self, capital, variant):
-        self._write_notification(
-            'MARKET_OPEN',
-            '{} Market Open 🔔'.format(BOT_NAME),
-            'Capital ₹{:,.0f} | Scanning for signals...'.format(capital),
-            {'capital': capital, 'variant': variant}
-        )
+        msg = "🔔 <b>MARKET OPEN</b>\nBot starting...\nCapital: ₹{:,.0f}\nVariant: {}\nTime: {}".format(
+            capital, variant, datetime.now().strftime('%H:%M:%S'))
+        self.send(msg)
