@@ -246,7 +246,7 @@ class AdaptiveTrader:
                 print("[{}] Positions: {} | Capital: Rs.{:,.0f} | Daily: Rs.{:.0f}".format(
                     now, active, self.capital, self.daily_pnl))
 
-                time.sleep(300)
+                time.sleep(int(os.environ.get("SCAN_INTERVAL", 60)))
 
             except KeyboardInterrupt:
                 print("\nStopped.")
