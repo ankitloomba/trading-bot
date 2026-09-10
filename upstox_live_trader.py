@@ -4,7 +4,6 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime
 import pytz
-import random
 
 from strategy import BreakoutStrategy
 from config import *
@@ -36,7 +35,6 @@ class Position:
 
     def should_exit(self, current_price):
         profit_pct = (current_price - self.entry_price) / self.entry_price
-
         if self.params['use_trailing']:
             trail_stop = self.highest_price * (1 - self.params['trail_pct'])
             if current_price < trail_stop and self.highest_price > self.entry_price * 1.005:
@@ -44,13 +42,9 @@ class Position:
         else:
             if profit_pct >= self.params['profit_target']:
                 return True, 'PROFIT_TARGET'
-
         if current_price <= self.hard_stop:
             return True, 'HARD_STOP'
         return False, None
-
-    def unrealised_pnl(self, current_price):
-        return (current_price - self.entry_price) / self.entry_price * self.capital
 
 
 class AdaptiveTrader:
@@ -63,6 +57,7 @@ class AdaptiveTrader:
         self.daily_pnl = 0
         self.capital = float(os.environ.get('STARTING_CAPITAL', STARTING_CAPITAL))
         self.start_capital = self.capital
+        self.symbols = SYMBOLS
 
         if DB_AVAILABLE:
             try:
@@ -72,15 +67,15 @@ class AdaptiveTrader:
                 print("Database: {}".format(e))
 
         print("\n" + "="*60)
-        print("  ADAPTIVE TRADING BOT v2")
+        print("  {} {} - MULTI-SYMBOL TRADER".format(BOT_NAME, BOT_EMOJI))
         print("="*60)
-        print("Capital:     Rs.{:,.0f}".format(self.capital))
-        print("Max trades:  {}".format(MAX_POSITIONS))
-        print("Buffer:      Rs.{:,.0f}".format(BUFFER_CASH))
-        print("Stop loss:   {:.1f}%".format(STOP_LOSS*100))
-        print("A/B testing: {}".format("Enabled" if AB_TEST_ENABLED else "Disabled"))
+        print("Capital:  Rs.{:,.0f}".format(self.capital))
+        print("Symbols:  {}".format(len(self.symbols)))
+        for s in self.symbols:
+            print("  - {}".format(s))
+        print("Max pos:  {}".format(MAX_POSITIONS))
+        print("Stop:     {:.1f}%".format(STOP_LOSS*100))
         print("="*60)
-        print(self.ab_test.get_report())
 
     def is_market_open(self):
         now = datetime.now(IST)
@@ -100,7 +95,6 @@ class AdaptiveTrader:
         return self.capital - used - BUFFER_CASH
 
     def allocate_capital(self, n_signals):
-        """Allocate capital across signals based on count."""
         avail = self.available_capital()
         if avail <= 0:
             return []
@@ -111,10 +105,9 @@ class AdaptiveTrader:
         else:
             return [avail * 0.5, avail * 0.3, avail * 0.2]
 
-    def get_live_data(self, symbol=None):
-        sym = symbol or SYMBOL
+    def get_live_data(self, symbol):
         try:
-            raw = yf.download(sym, period='1d', interval='5m', progress=False)
+            raw = yf.download(symbol, period='1d', interval='5m', progress=False)
             if raw.empty:
                 return None
             df = pd.DataFrame({
@@ -126,7 +119,6 @@ class AdaptiveTrader:
             }, index=raw.index)
             return df
         except Exception as e:
-            print("Data error: {}".format(e))
             return None
 
     def check_entries(self):
@@ -137,97 +129,86 @@ class AdaptiveTrader:
         if self.available_capital() < 500:
             return
 
-        df = self.get_live_data()
-        if df is None or len(df) < BREAKOUT_PERIODS + 2:
+        # Already trading symbols
+        active_symbols = [p.symbol for p in self.positions]
+
+        # Scan all symbols for signals
+        signals = []
+        for symbol in self.symbols:
+            if symbol in active_symbols:
+                continue
+            df = self.get_live_data(symbol)
+            if df is None or len(df) < BREAKOUT_PERIODS + 2:
+                continue
+            signal = self.strategy.get_signal(df)
+            if signal:
+                signals.append((symbol, signal))
+
+        if not signals:
             return
 
-        signal = self.strategy.get_signal(df)
-        if not signal:
-            return
+        # Sort by score, take top ones
+        signals.sort(key=lambda x: x[1]['score'], reverse=True)
+        slots = MAX_POSITIONS - len(self.positions)
+        signals = signals[:slots]
+        allocations = self.allocate_capital(len(signals))
 
-        variant = self.ab_test.get_variant_for_trade() if AB_TEST_ENABLED else 'A'
-        params = self.ab_test.get_params(variant)
-        allocations = self.allocate_capital(1)
-        if not allocations:
-            return
-
-        alloc = allocations[0]
-        now = datetime.now(IST).strftime('%H:%M:%S')
-        pos = Position(SYMBOL, signal['price'], alloc, signal['score'], variant, params)
-        self.positions.append(pos)
-
-        print("\n[{}] BUY - Variant {} | Score: {}/10".format(now, variant, signal['score']))
-        print("  Entry:   Rs.{:.2f}".format(signal['price']))
-        print("  Capital: Rs.{:,.0f}".format(alloc))
-        print("  Mode:    {}".format(params['name']))
-        print("  Stop:    Rs.{:.2f}".format(pos.hard_stop))
-
-        self.notifier.trade_open(
-            SYMBOL, signal['price'], signal['score'],
-            alloc, pos.hard_stop
-        )
+        for idx, (symbol, signal) in enumerate(signals):
+            if idx >= len(allocations):
+                break
+            alloc = allocations[idx]
+            variant = self.ab_test.get_variant_for_trade() if AB_TEST_ENABLED else 'A'
+            params = self.ab_test.get_params(variant)
+            pos = Position(symbol, signal['price'], alloc, signal['score'], variant, params)
+            self.positions.append(pos)
+            now = datetime.now(IST).strftime('%H:%M:%S')
+            print("\n[{}] BUY {} | Score:{}/10 | Variant:{} | Rs.{:,.0f}".format(
+                now, symbol, signal['score'], variant, alloc))
+            self.notifier.trade_open(symbol, signal['price'], signal['score'], alloc, pos.hard_stop)
 
     def check_exits(self):
-        df = self.get_live_data()
-        if df is None:
-            return
-        current_price = float(df['Close'].values.flatten()[-1])
-        now = datetime.now(IST).strftime('%H:%M:%S')
-
         to_remove = []
         for pos in self.positions:
+            df = self.get_live_data(pos.symbol)
+            if df is None:
+                continue
+            current_price = float(df['Close'].values.flatten()[-1])
+            now = datetime.now(IST).strftime('%H:%M:%S')
             pos.update_trailing(current_price)
             exit_trade, reason = pos.should_exit(current_price)
 
-            if exit_trade or (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 15):
+            force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 15)
+            if exit_trade or force_exit:
                 reason = reason or 'TIME_EXIT'
                 pnl = (current_price - pos.entry_price) / pos.entry_price * pos.capital
                 self.capital += pnl
                 self.daily_pnl += pnl
                 icon = "WIN" if pnl >= 0 else "LOSS"
-
                 trade = {
                     'symbol': pos.symbol,
                     'entry_time': pos.entry_time,
                     'exit_time': now,
                     'entry_price': pos.entry_price,
                     'exit_price': current_price,
-                    'highest_price': pos.highest_price,
                     'pnl': round(pnl, 2),
                     'pnl_pct': round((current_price-pos.entry_price)/pos.entry_price*100, 4),
                     'reason': reason,
-                    'capital_used': pos.capital,
-                    'signal_score': pos.score,
                     'variant': pos.variant
                 }
                 self.daily_trades.append(trade)
-
-                print("\n[{}] {} - Variant {}".format(now, icon, pos.variant))
-                print("  Entry:   Rs.{:.2f}".format(pos.entry_price))
-                print("  Peak:    Rs.{:.2f}".format(pos.highest_price))
-                print("  Exit:    Rs.{:.2f}".format(current_price))
-                print("  P&L:     Rs.{:.2f} ({:.2f}%)".format(pnl, trade['pnl_pct']))
-                print("  Reason:  {}".format(reason))
-                print("  Capital: Rs.{:,.2f}".format(self.capital))
-                print("  Daily:   Rs.{:.2f}".format(self.daily_pnl))
-
-                self.notifier.trade_close(
-                    pos.symbol, pos.entry_price, current_price, pnl, reason, self.capital)
-
+                print("\n[{}] {} {} | P&L: Rs.{:+.2f} | Capital: Rs.{:,.0f}".format(
+                    now, icon, pos.symbol, pnl, self.capital))
+                self.notifier.trade_close(pos.symbol, pos.entry_price, current_price, pnl, reason, self.capital)
                 if AB_TEST_ENABLED:
                     self.ab_test.log_trade(pos.variant, trade)
-
                 if DB_AVAILABLE:
                     try:
                         log_trade(trade)
                     except:
                         pass
-
                 to_remove.append(pos)
-
                 if self.daily_pnl <= -MAX_LOSS_PER_DAY:
                     print("\nDAILY LOSS LIMIT HIT - Stopping")
-                    self.notifier.crash_alert("Daily loss limit Rs.{} reached".format(MAX_LOSS_PER_DAY))
                     self.print_summary()
                     exit(0)
 
@@ -237,18 +218,15 @@ class AdaptiveTrader:
     def print_summary(self):
         wins = len([t for t in self.daily_trades if t['pnl'] > 0])
         losses = len([t for t in self.daily_trades if t['pnl'] <= 0])
-        print("\n" + "="*60)
-        print("  DAILY SUMMARY")
-        print("="*60)
-        print("Trades:    {} (W:{} L:{})".format(len(self.daily_trades), wins, losses))
-        print("P&L:       Rs.{:.2f}".format(self.daily_pnl))
-        print("Capital:   Rs.{:,.2f}".format(self.capital))
-        print(self.ab_test.get_report())
+        print("\n=== {} {} DAILY SUMMARY ===".format(BOT_NAME, BOT_EMOJI))
+        print("Trades: {} (W:{} L:{})".format(len(self.daily_trades), wins, losses))
+        print("P&L: Rs.{:.2f}".format(self.daily_pnl))
+        print("Capital: Rs.{:,.2f}".format(self.capital))
         self.notifier.daily_summary(self.daily_trades, self.capital, self.start_capital)
 
     def run(self):
         self.notifier.market_open(self.capital, 'A+B')
-        print("\nWaiting for market open (9:15am IST)...")
+        print("\nScanning {} symbols every 5 mins...".format(len(self.symbols)))
         while True:
             try:
                 if not self.is_market_open():
@@ -264,19 +242,18 @@ class AdaptiveTrader:
                 self.check_entries()
 
                 now = datetime.now(IST).strftime('%H:%M:%S')
-                positions_str = "{} open".format(len(self.positions)) if self.positions else "no positions"
-                print("[{}] Scanning... {} | Capital: Rs.{:,.0f} | Daily P&L: Rs.{:.0f}".format(
-                    now, positions_str, self.capital, self.daily_pnl))
+                active = ", ".join([p.symbol.split(".")[0].replace("^","") for p in self.positions]) or "none"
+                print("[{}] Positions: {} | Capital: Rs.{:,.0f} | Daily: Rs.{:.0f}".format(
+                    now, active, self.capital, self.daily_pnl))
 
                 time.sleep(300)
 
             except KeyboardInterrupt:
-                print("\nStopped manually.")
+                print("\nStopped.")
                 self.print_summary()
                 break
             except Exception as e:
                 print("Error: {} - retrying in 60s".format(e))
-                self.notifier.crash_alert(str(e))
                 time.sleep(60)
 
 if __name__ == '__main__':
