@@ -1,145 +1,134 @@
-import os
+"""
+Upstox Broker - Places real orders for stocks and options
+"""
 import requests
+import os
+
+BASE_URL = "https://api.upstox.com/v2"
+
+# Index to stock mapping (when index signals, buy these stocks)
+INDEX_TO_STOCK = {
+    "^NSEBANK": "HDFCBANK",
+    "^NSEI": "RELIANCE",
+    "^CNXIT": "INFY",
+}
+
+# Stock instrument keys for NSE
+STOCK_INSTRUMENTS = {
+    "HDFCBANK": "NSE_EQ|INE040A01034",
+    "RELIANCE": "NSE_EQ|INE002A01018",
+    "INFY": "NSE_EQ|INE009A01021",
+    "TCS": "NSE_EQ|INE467B01029",
+    "ICICIBANK": "NSE_EQ|INE090A01021",
+}
 
 class UpstoxBroker:
-    def __init__(self):
-        self.client_id = os.environ.get('UPSTOX_CLIENT_ID')
-        self.client_secret = os.environ.get('UPSTOX_CLIENT_SECRET')
-        self.redirect_uri = os.environ.get('UPSTOX_REDIRECT_URI')
-        self.access_token = os.environ.get('UPSTOX_ACCESS_TOKEN')
-        self.base_url = "https://api.upstox.com/v2"
-        print("Upstox broker initialized")
+    def __init__(self, access_token):
+        self.token = access_token
+        self.headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
 
-    def get_auth_url(self):
-        return (
-            "https://api.upstox.com/v2/login/authorization/dialog"
-            "?response_type=code"
-            "&client_id={}".format(self.client_id) +
-            "&redirect_uri={}".format(self.redirect_uri)
+    def get_ltp(self, instrument_key):
+        try:
+            res = requests.get(
+                f"{BASE_URL}/market-quote/ltp",
+                headers=self.headers,
+                params={'symbol': instrument_key}
+            )
+            data = res.json()
+            if data.get('status') == 'success':
+                return float(list(data['data'].values())[0]['last_price'])
+            return None
+        except Exception as e:
+            print(f"[BROKER] LTP error: {e}")
+            return None
+
+    def place_order(self, instrument_key, quantity, transaction_type='BUY', order_type='MARKET', price=0):
+        try:
+            payload = {
+                'quantity': quantity,
+                'product': 'D',  # Delivery for stocks (CNC)
+                'validity': 'DAY',
+                'price': price,
+                'tag': 'intragini',
+                'instrument_token': instrument_key,
+                'order_type': order_type,
+                'transaction_type': transaction_type,
+                'disclosed_quantity': 0,
+                'trigger_price': 0,
+                'is_amo': False
+            }
+            res = requests.post(
+                f"{BASE_URL}/order/place",
+                headers=self.headers,
+                json=payload
+            )
+            data = res.json()
+            if data.get('status') == 'success':
+                order_id = data['data']['order_id']
+                print(f"[BROKER] ✅ {transaction_type} order placed! ID:{order_id}")
+                return order_id
+            else:
+                print(f"[BROKER] ❌ Order failed: {data}")
+                return None
+        except Exception as e:
+            print(f"[BROKER] Order error: {e}")
+            return None
+
+    def buy_stock(self, symbol, capital):
+        """Buy stock with given capital"""
+        # Map index symbol to stock
+        stock = INDEX_TO_STOCK.get(symbol, symbol.replace('.NS','').replace('^',''))
+        instrument_key = STOCK_INSTRUMENTS.get(stock)
+        if not instrument_key:
+            print(f"[BROKER] No instrument key for {stock}")
+            return None
+
+        ltp = self.get_ltp(instrument_key)
+        if not ltp:
+            print(f"[BROKER] Could not get LTP for {stock}")
+            return None
+
+        quantity = int(capital / ltp)
+        if quantity < 1:
+            print(f"[BROKER] Not enough capital for {stock} at Rs.{ltp:.2f}")
+            return None
+
+        actual_cost = quantity * ltp
+        print(f"[BROKER] Buying {stock}: {quantity} shares @ Rs.{ltp:.2f} = Rs.{actual_cost:.2f}")
+        order_id = self.place_order(instrument_key, quantity, 'BUY')
+        if order_id:
+            return {
+                'order_id': order_id,
+                'stock': stock,
+                'instrument_key': instrument_key,
+                'quantity': quantity,
+                'entry_price': ltp,
+                'capital': actual_cost
+            }
+        return None
+
+    def sell_stock(self, position):
+        """Sell stock position"""
+        print(f"[BROKER] Selling {position['stock']}: {position['quantity']} shares")
+        return self.place_order(
+            position['instrument_key'],
+            position['quantity'],
+            'SELL'
         )
 
-    def login(self, auth_code):
-        print("Logging into Upstox...")
-        try:
-            response = requests.post(
-                "{}/login/authorization/token".format(self.base_url),
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                data={
-                    'code': auth_code,
-                    'client_id': self.client_id,
-                    'client_secret': self.client_secret,
-                    'redirect_uri': self.redirect_uri,
-                    'grant_type': 'authorization_code'
-                }
-            )
-            data = response.json()
-            if data.get('access_token'):
-                self.access_token = data['access_token']
-                print("Upstox login successful!")
-                return True
-            print("Login failed: {}".format(data))
-            return False
-        except Exception as e:
-            print("Login error: {}".format(e))
-            return False
-
-    def get_ltp(self, symbol="NSE_INDEX|Nifty Bank"):
-        if not self.access_token:
-            print("Not logged in!")
-            return None
-        try:
-            response = requests.get(
-                "{}/market-quote/ltp".format(self.base_url),
-                headers={
-                    'Authorization': 'Bearer {}'.format(self.access_token),
-                    'Accept': 'application/json'
-                },
-                params={'symbol': symbol}
-            )
-            data = response.json()
-            if data.get('status') == 'success':
-                ltp = list(data['data'].values())[0]['last_price']
-                print("Bank Nifty LTP: Rs.{}".format(ltp))
-                return float(ltp)
-            print("LTP failed: {}".format(data))
-            return None
-        except Exception as e:
-            print("LTP error: {}".format(e))
-            return None
-
     def get_funds(self):
-        if not self.access_token:
-            return 0
+        """Get available funds"""
         try:
-            response = requests.get(
-                "{}/user/get-funds-and-margin".format(self.base_url),
-                headers={
-                    'Authorization': 'Bearer {}'.format(self.access_token),
-                    'Accept': 'application/json'
-                },
-                params={'segment': 'EQ'}
-            )
-            data = response.json()
+            res = requests.get(f"{BASE_URL}/user/get-funds-and-margin", headers=self.headers)
+            data = res.json()
             if data.get('status') == 'success':
-                funds = data['data']['equity']['available_margin']
-                print("Available funds: Rs.{}".format(funds))
-                return float(funds)
-            return 0
-        except Exception as e:
-            print("Funds error: {}".format(e))
-            return 0
-
-    def place_order(self, symbol, qty, side, price=0):
-        if not self.access_token:
-            print("Not logged in!")
-            return None
-        try:
-            response = requests.post(
-                "{}/order/place".format(self.base_url),
-                headers={
-                    'Authorization': 'Bearer {}'.format(self.access_token),
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                json={
-                    'quantity': qty,
-                    'product': 'I',
-                    'validity': 'DAY',
-                    'price': price,
-                    'tag': 'trading-bot',
-                    'instrument_token': symbol,
-                    'order_type': 'MARKET',
-                    'transaction_type': side,
-                    'disclosed_quantity': 0,
-                    'trigger_price': 0,
-                    'is_amo': False
-                }
-            )
-            data = response.json()
-            if data.get('status') == 'success':
-                print("Order placed: {} {} {}".format(side, qty, symbol))
-                return data['data']['order_id']
-            print("Order failed: {}".format(data))
+                equity = data['data'].get('equity', {})
+                return float(equity.get('available_margin', 0))
             return None
         except Exception as e:
-            print("Order error: {}".format(e))
+            print(f"[BROKER] Funds error: {e}")
             return None
-
-    def get_positions(self):
-        if not self.access_token:
-            return []
-        try:
-            response = requests.get(
-                "{}/portfolio/short-term-positions".format(self.base_url),
-                headers={
-                    'Authorization': 'Bearer {}'.format(self.access_token),
-                    'Accept': 'application/json'
-                }
-            )
-            data = response.json()
-            if data.get('status') == 'success':
-                return data.get('data', [])
-            return []
-        except Exception as e:
-            print("Positions error: {}".format(e))
-            return []
