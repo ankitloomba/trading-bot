@@ -1,130 +1,112 @@
+"""
+Intra Gini 🔥 — Breakout Strategy
+With debug logging to show scores per symbol
+"""
 import pandas as pd
 import numpy as np
-from config import *
 
 class BreakoutStrategy:
     def __init__(self):
-        self.trades = []
+        self.breakout_periods = 15
+        self.rsi_period = 14
 
-    def calculate_rsi(self, closes, period=14):
-        delta = closes.diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
-        rs = avg_gain / avg_loss
+    def calculate_rsi(self, series, period=14):
+        delta = series.diff()
+        gain = delta.where(delta > 0, 0).rolling(period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+        rs = gain / loss
         return 100 - (100 / (1 + rs))
 
-    def signal_strength(self, closes, highs, lows, i):
-        """Score signal 1-10. 7+ = take trade."""
-        score = 0
-        current = float(closes.iloc[i])
-        prev_high = float(highs.iloc[i-BREAKOUT_PERIODS:i].max())
-        rsi_series = self.calculate_rsi(closes.iloc[:i+1])
-        rsi = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
-
-        # 1. Breakout size (0-3 pts)
-        breakout_pct = (current - prev_high) / prev_high * 100
-        if breakout_pct > 0.3: score += 1
-        if breakout_pct > 0.6: score += 1
-        if breakout_pct > 1.0: score += 1
-
-        # 2. RSI quality (0-2 pts)
-        if 40 <= rsi <= 60: score += 2   # fresh momentum
-        elif 35 <= rsi <= 65: score += 1  # acceptable
-
-        # 3. Candle pattern - last 3 candles (0-2 pts)
-        if i >= 3:
-            last3 = closes.iloc[i-3:i+1]
-            green_candles = sum(1 for j in range(len(last3)-1) if last3.iloc[j+1] > last3.iloc[j])
-            score += min(2, green_candles)
-
-        # 4. Time of day (0-2 pts)
+    def get_signal(self, df, symbol='', debug=True):
         try:
-            hour = closes.index[i].hour
-            minute = closes.index[i].minute
-            t = hour * 100 + minute
-            if 930 <= t <= 1300: score += 2   # prime time
-            elif 915 <= t <= 1430: score += 1  # acceptable
-        except:
-            score += 1
+            close = df['Close']
+            high = df['High']
+            volume = df['Volume']
 
-        # 5. Price above breakout level (0-1 pt)
-        if current > prev_high * 1.002: score += 1
+            score = 0
+            details = []
 
-        return min(10, score), {
-            'score': score,
-            'breakout_pct': round(breakout_pct, 3),
-            'rsi': round(rsi, 1),
-            'prev_high': round(prev_high, 2),
-            'current': round(current, 2)
-        }
+            # 1. Breakout above 15-candle high (0-3 pts)
+            recent_high = high.iloc[-self.breakout_periods-1:-1].max()
+            current_price = float(close.iloc[-1])
+            breakout_pct = (current_price - recent_high) / recent_high * 100
 
-    def get_signal(self, df):
-        """Returns signal with strength score."""
-        closes = pd.Series(df['Close'].values.flatten(), index=df.index)
-        highs = pd.Series(df['High'].values.flatten(), index=df.index)
-        lows = pd.Series(df['Low'].values.flatten(), index=df.index)
-        i = len(closes) - 1
-        if i < BREAKOUT_PERIODS + 1:
+            if breakout_pct > 0.5:
+                score += 3
+                details.append("Breakout +{:.2f}% ✅✅✅".format(breakout_pct))
+            elif breakout_pct > 0.2:
+                score += 2
+                details.append("Breakout +{:.2f}% ✅✅".format(breakout_pct))
+            elif breakout_pct > 0:
+                score += 1
+                details.append("Breakout +{:.2f}% ✅".format(breakout_pct))
+            else:
+                details.append("No breakout {:.2f}% ❌".format(breakout_pct))
+
+            # 2. RSI in range (0-2 pts)
+            rsi = self.calculate_rsi(close)
+            rsi_val = float(rsi.iloc[-1])
+            if 45 <= rsi_val <= 65:
+                score += 2
+                details.append("RSI {:.1f} ✅✅".format(rsi_val))
+            elif 40 <= rsi_val < 45 or 65 < rsi_val <= 70:
+                score += 1
+                details.append("RSI {:.1f} ✅".format(rsi_val))
+            else:
+                details.append("RSI {:.1f} ❌".format(rsi_val))
+
+            # 3. Last 3 candles green (0-2 pts)
+            last3 = close.iloc[-3:].values
+            green = sum(1 for i in range(1, len(last3)) if last3[i] > last3[i-1])
+            if green >= 2:
+                score += 2
+                details.append("{}  green candles ✅✅".format(green))
+            elif green == 1:
+                score += 1
+                details.append("1 green candle ✅")
+            else:
+                details.append("No green candles ❌")
+
+            # 4. Trading time bonus (0-2 pts)
+            from datetime import datetime
+            import pytz
+            IST = pytz.timezone('Asia/Kolkata')
+            now = datetime.now(IST)
+            if 9 <= now.hour < 13:
+                score += 2
+                details.append("Prime time ✅✅")
+            elif 13 <= now.hour < 14:
+                score += 1
+                details.append("Good time ✅")
+            else:
+                details.append("Late session ❌")
+
+            # 5. Volume spike (0-1 pt)
+            avg_vol = volume.rolling(20).mean().iloc[-1]
+            vol_ratio = float(volume.iloc[-1]) / float(avg_vol) if avg_vol > 0 else 0
+            if vol_ratio >= 1.5:
+                score += 1
+                details.append("Volume {:.1f}x ✅".format(vol_ratio))
+            else:
+                details.append("Volume {:.1f}x ❌".format(vol_ratio))
+
+            # Debug log
+            if debug and symbol:
+                print("[SCAN] {} | Score:{}/10 | Price:{:.2f}".format(
+                    symbol.replace('.NS','').replace('^',''),
+                    score, current_price))
+                for d in details:
+                    print("       {}".format(d))
+
+            if score >= 5:
+                return {
+                    'score': score,
+                    'price': current_price,
+                    'type': 'BUY',
+                    'reasons': details
+                }
             return None
-        current = float(closes.iloc[i])
-        prev_high = float(highs.iloc[i-BREAKOUT_PERIODS:i].max())
-        if current <= prev_high:
+
+        except Exception as e:
+            print("[SCAN] {} error: {}".format(symbol, e))
             return None
-        score, details = self.signal_strength(closes, highs, lows, i)
-        if score >= 7:
-            return {'score': score, 'price': current, 'details': details}
-        return None
-
-    def get_trailing_stop(self, entry_price, highest_price, trail_pct=0.003):
-        """Trailing stop 0.3% below highest price reached."""
-        return highest_price * (1 - trail_pct)
-
-    def backtest(self, df):
-        closes = pd.Series(df['Close'].values.flatten(), index=df.index)
-        highs = pd.Series(df['High'].values.flatten(), index=df.index)
-        lows = pd.Series(df['Low'].values.flatten(), index=df.index)
-        trades = []
-        position = None
-        entry_price = None
-        entry_time = None
-        highest_price = None
-
-        for i in range(BREAKOUT_PERIODS + 1, len(closes)):
-            current = float(closes.iloc[i])
-            if position is None:
-                score, details = self.signal_strength(closes, highs, lows, i)
-                if score >= 7:
-                    position = 'LONG'
-                    entry_price = current
-                    entry_time = closes.index[i]
-                    highest_price = current
-            elif position == 'LONG':
-                highest_price = max(highest_price, current)
-                trail_stop = self.get_trailing_stop(entry_price, highest_price)
-                hard_stop = entry_price * (1 - STOP_LOSS)
-                exit_price = None
-                reason = None
-                if current < trail_stop and highest_price > entry_price * 1.005:
-                    exit_price = current
-                    reason = 'TRAIL_STOP'
-                elif current < hard_stop:
-                    exit_price = current
-                    reason = 'HARD_STOP'
-                if exit_price:
-                    pnl = exit_price - entry_price
-                    trades.append({
-                        'entry_time': str(entry_time),
-                        'entry_price': round(entry_price, 2),
-                        'exit_time': str(closes.index[i]),
-                        'exit_price': round(exit_price, 2),
-                        'highest_price': round(highest_price, 2),
-                        'pnl': round(pnl, 2),
-                        'pnl_pct': round((pnl/entry_price)*100, 4),
-                        'reason': reason
-                    })
-                    position = None
-                    entry_price = None
-                    highest_price = None
-        return trades

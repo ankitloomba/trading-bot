@@ -170,7 +170,7 @@ class AdaptiveTrader:
             # Use Bank Nifty signal for options direction
             df = self.get_live_data("^NSEBANK")
             if df is not None and len(df) > BREAKOUT_PERIODS + 2:
-                signal = self.strategy.get_signal(df)
+                signal = self.strategy.get_signal(df, symbol=symbol)
                 if signal and signal['score'] >= self.min_score:
                     now = datetime.now(IST).strftime('%H:%M:%S')
                     spot = signal['price']
@@ -199,7 +199,7 @@ class AdaptiveTrader:
             df = self.get_live_data(symbol)
             if df is None or len(df) < BREAKOUT_PERIODS + 2:
                 continue
-            signal = self.strategy.get_signal(df)
+            signal = self.strategy.get_signal(df, symbol=symbol)
             if signal and signal['score'] >= self.min_score:
                 signals.append((symbol, signal))
 
