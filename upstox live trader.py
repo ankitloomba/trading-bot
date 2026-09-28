@@ -1,261 +1,489 @@
+"""
+Intra Gini 🔥 — Adaptive Multi-Symbol Trader
+Primary broker: Upstox (manual login) | Backup: Angel One (auto-login)
+Scans 6 symbols every 60s. Real orders when logged in, paper otherwise.
+"""
 import os
 import time
-import yfinance as yf
-import pandas as pd
-from datetime import datetime
+import json
+import threading
 import pytz
+import yfinance as yf
+from datetime import datetime, timedelta
 
-from strategy import BreakoutStrategy
-from config import *
-from notifications import Notifier
-from ab_test import ABTest
+IST = pytz.timezone("Asia/Kolkata")
 
-try:
-    from db import setup_db, log_trade
-    DB_AVAILABLE = True
-except:
-    DB_AVAILABLE = False
+# ── Config from env ───────────────────────────────────────
+SYMBOLS          = os.environ.get("SYMBOLS", "^NSEBANK,^NSEI,^CNXIT,RELIANCE.NS,HDFCBANK.NS,INFY.NS").split(",")
+OPTIONS_SYMBOLS  = ["^NSEBANK", "^NSEI", "^CNXIT"]
+STARTING_CAP     = float(os.environ.get("STARTING_CAPITAL", "5000"))
+MAX_POSITIONS    = int(os.environ.get("MAX_POSITIONS", "3"))
+BUFFER_CASH      = float(os.environ.get("BUFFER_CASH", "500"))
+OPTIONS_CAP      = float(os.environ.get("OPTIONS_CAPITAL", "2000"))
+OPTIONS_ENABLED  = os.environ.get("OPTIONS_ENABLED", "true").lower() == "true"
+MIN_SCORE        = int(os.environ.get("MIN_SIGNAL_SCORE", "5"))
+STOP_LOSS        = float(os.environ.get("STOP_LOSS", "0.005"))
+TRAIL_PCT        = float(os.environ.get("TRAIL_PCT", "0.003"))
+MAX_LOSS_DAY     = float(os.environ.get("MAX_LOSS_PER_DAY", "500"))
+AB_TEST          = os.environ.get("AB_TEST_ENABLED", "true").lower() == "true"
+SCAN_INTERVAL    = int(os.environ.get("SCAN_INTERVAL", "60"))
 
-IST = pytz.timezone('Asia/Kolkata')
+STOCKS_CAP       = STARTING_CAP - OPTIONS_CAP - BUFFER_CASH  # ~2500
 
-class Position:
-    def __init__(self, symbol, entry_price, capital, score, variant, params):
-        self.symbol = symbol
-        self.entry_price = entry_price
-        self.capital = capital
-        self.score = score
-        self.variant = variant
-        self.params = params
-        self.highest_price = entry_price
-        self.entry_time = datetime.now(IST).strftime('%H:%M:%S')
-        self.hard_stop = entry_price * (1 - params['stop_loss'])
 
-    def update_trailing(self, current_price):
-        self.highest_price = max(self.highest_price, current_price)
+def ist_now():
+    return datetime.now(IST)
 
-    def should_exit(self, current_price):
-        profit_pct = (current_price - self.entry_price) / self.entry_price
-        if self.params['use_trailing']:
-            trail_stop = self.highest_price * (1 - self.params['trail_pct'])
-            if current_price < trail_stop and self.highest_price > self.entry_price * 1.005:
-                return True, 'TRAIL_STOP'
+
+def is_market_open():
+    now = ist_now()
+    if now.weekday() >= 5:   # Saturday/Sunday
+        return False
+    market_open  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+    market_close = now.replace(hour=15, minute=25, second=0, microsecond=0)
+    return market_open <= now <= market_close
+
+
+def is_trading_time():
+    """9:15 AM – 3:00 PM IST (stop new entries at 3 PM)."""
+    now = ist_now()
+    if now.weekday() >= 5:
+        return False
+    open_t  = now.replace(hour=9,  minute=15, second=0, microsecond=0)
+    close_t = now.replace(hour=15, minute=0,  second=0, microsecond=0)
+    return open_t <= now <= close_t
+
+
+def log(msg):
+    print("[{}] {}".format(ist_now().strftime("%H:%M:%S"), msg))
+
+
+# ── Strategy: signal scoring 1-10 ────────────────────────
+def get_signal(df, symbol="", debug=False):
+    """Score 0-10. Minimum MIN_SCORE to trade."""
+    try:
+        if df is None or len(df) < 20:
+            return 0, {}
+        close  = df["Close"].squeeze()
+        volume = df["Volume"].squeeze()
+        high   = df["High"].squeeze()
+
+        score  = 0
+        detail = {}
+
+        # 1. Breakout: price > 20-candle high (0-3 pts)
+        prev_high = high.iloc[-21:-1].max()
+        curr      = float(close.iloc[-1])
+        if curr > prev_high * 1.001:
+            score += 3
+            detail["breakout"] = "YES ({:.2f} > {:.2f})".format(curr, prev_high)
+        elif curr > prev_high * 0.998:
+            score += 1
+            detail["breakout"] = "NEAR"
         else:
-            if profit_pct >= self.params['profit_target']:
-                return True, 'PROFIT_TARGET'
-        if current_price <= self.hard_stop:
-            return True, 'HARD_STOP'
-        return False, None
+            detail["breakout"] = "NO"
 
-
-class AdaptiveTrader:
-    def __init__(self):
-        self.strategy = BreakoutStrategy()
-        self.notifier = Notifier()
-        self.ab_test = ABTest()
-        self.positions = []
-        self.daily_trades = []
-        self.daily_pnl = 0
-        self.capital = float(os.environ.get('STARTING_CAPITAL', STARTING_CAPITAL))
-        self.start_capital = self.capital
-        self.symbols = SYMBOLS
-
-        if DB_AVAILABLE:
-            try:
-                setup_db()
-                print("Database: Connected")
-            except Exception as e:
-                print("Database: {}".format(e))
-
-        print("\n" + "="*60)
-        print("  {} {} - MULTI-SYMBOL TRADER".format(BOT_NAME, BOT_EMOJI))
-        print("="*60)
-        print("Capital:  Rs.{:,.0f}".format(self.capital))
-        print("Symbols:  {}".format(len(self.symbols)))
-        for s in self.symbols:
-            print("  - {}".format(s))
-        print("Max pos:  {}".format(MAX_POSITIONS))
-        print("Stop:     {:.1f}%".format(STOP_LOSS*100))
-        print("="*60)
-
-    def is_market_open(self):
-        now = datetime.now(IST)
-        if now.weekday() >= 5:
-            return False
-        o = now.replace(hour=9, minute=15, second=0)
-        c = now.replace(hour=15, minute=30, second=0)
-        return o <= now <= c
-
-    def is_trading_time(self):
-        now = datetime.now(IST)
-        cutoff = now.replace(hour=14, minute=30, second=0)
-        return self.is_market_open() and now <= cutoff
-
-    def available_capital(self):
-        used = sum(p.capital for p in self.positions)
-        return self.capital - used - BUFFER_CASH
-
-    def allocate_capital(self, n_signals):
-        avail = self.available_capital()
-        if avail <= 0:
-            return []
-        if n_signals == 1:
-            return [avail]
-        elif n_signals == 2:
-            return [avail * 0.6, avail * 0.4]
+        # 2. RSI 40-65 (0-2 pts)
+        delta     = close.diff()
+        gain      = delta.clip(lower=0).rolling(14).mean()
+        loss      = (-delta.clip(upper=0)).rolling(14).mean()
+        rs        = gain / (loss + 1e-9)
+        rsi       = float(100 - (100 / (1 + rs.iloc[-1])))
+        if 40 <= rsi <= 65:
+            score += 2
+            detail["rsi"] = "{:.1f} ✓".format(rsi)
+        elif 30 <= rsi <= 75:
+            score += 1
+            detail["rsi"] = "{:.1f} ~".format(rsi)
         else:
-            return [avail * 0.5, avail * 0.3, avail * 0.2]
+            detail["rsi"] = "{:.1f} ✗".format(rsi)
 
-    def get_live_data(self, symbol):
+        # 3. Green candles: last 3 (0-2 pts)
+        opens  = df["Open"].squeeze()
+        greens = sum(1 for i in range(-3, 0) if float(close.iloc[i]) > float(opens.iloc[i]))
+        score += greens * (2 // 3 + (1 if greens == 3 else 0))
+        score  = min(score, score)   # cap handled below
+        detail["green_candles"] = "{}/3".format(greens)
+
+        # 4. Trading time (0-2 pts) — best 9:30-11:30, 13:30-14:30
+        now = ist_now()
+        hr  = now.hour + now.minute / 60
+        if (9.5 <= hr <= 11.5) or (13.5 <= hr <= 14.5):
+            score += 2
+            detail["time"] = "PRIME"
+        elif 9.25 <= hr <= 15.0:
+            score += 1
+            detail["time"] = "OK"
+        else:
+            detail["time"] = "BAD"
+
+        # 5. Volume spike (0-1 pt)
+        avg_vol = float(volume.iloc[-20:-1].mean())
+        cur_vol = float(volume.iloc[-1])
+        if avg_vol > 0 and cur_vol > avg_vol * 1.5:
+            score += 1
+            detail["volume"] = "SPIKE {:.1f}x".format(cur_vol / avg_vol)
+        else:
+            detail["volume"] = "NORMAL"
+
+        score = min(score, 10)
+        if debug:
+            log("[SCAN] {} | Score:{}/10 | Price:{:.2f} | {}".format(
+                symbol.replace("^", ""), score, curr, detail))
+        return score, detail
+
+    except Exception as e:
+        log("[SIGNAL] Error for {}: {}".format(symbol, e))
+        return 0, {}
+
+
+# ── Upstox Broker ─────────────────────────────────────────
+class UpstoxBroker:
+    INDEX_TO_STOCK = {
+        "^NSEBANK": "HDFCBANK.NS",
+        "^NSEI":    "RELIANCE.NS",
+        "^CNXIT":   "INFY.NS",
+    }
+    UPSTOX_SYMBOLS = {
+        "HDFCBANK.NS": {"symbol": "HDFCBANK", "exchange": "NSE"},
+        "RELIANCE.NS": {"symbol": "RELIANCE", "exchange": "NSE"},
+        "INFY.NS":     {"symbol": "INFY",     "exchange": "NSE"},
+    }
+
+    def __init__(self, access_token=None):
+        self.access_token = access_token
+        self.client_id    = os.environ.get("UPSTOX_CLIENT_ID", "")
+        self.client_secret= os.environ.get("UPSTOX_CLIENT_SECRET", "")
+
+    def set_access_token(self, token):
+        self.access_token = token
+        log("[UPSTOX] Access token set ✅")
+
+    def get_ltp_yfinance(self, yf_symbol):
         try:
-            raw = yf.download(symbol, period='1d', interval='5m', progress=False)
-            if raw.empty:
+            ticker = yf.Ticker(yf_symbol)
+            hist   = ticker.history(period="1d", interval="1m")
+            if not hist.empty:
+                return float(hist["Close"].iloc[-1])
+        except Exception as e:
+            log("[UPSTOX] yfinance error {}: {}".format(yf_symbol, e))
+        return None
+
+    def buy_stock(self, symbol, capital):
+        if not self.access_token:
+            log("[UPSTOX] No token — cannot buy {}".format(symbol))
+            return None
+
+        trade_sym = self.INDEX_TO_STOCK.get(symbol, symbol)
+        info      = self.UPSTOX_SYMBOLS.get(trade_sym)
+        if not info:
+            log("[UPSTOX] No symbol map for {}".format(trade_sym))
+            return None
+
+        ltp = self.get_ltp_yfinance(trade_sym)
+        if not ltp:
+            log("[UPSTOX] No LTP for {}".format(trade_sym))
+            return None
+
+        qty = max(1, int(capital / ltp))
+        log("[UPSTOX] BUY {} x {} @ Rs.{:.2f}".format(qty, info["symbol"], ltp))
+
+        import requests
+        try:
+            resp = requests.post(
+                "https://api.upstox.com/v2/order/place",
+                headers={
+                    "Authorization": "Bearer {}".format(self.access_token),
+                    "Content-Type":  "application/json",
+                    "Accept":        "application/json",
+                },
+                json={
+                    "quantity":        qty,
+                    "product":         "I",        # Intraday
+                    "validity":        "DAY",
+                    "price":           0,
+                    "tag":             "intra-gini",
+                    "instrument_token":"NSE_EQ|{}".format(info["symbol"]),
+                    "order_type":      "MARKET",
+                    "transaction_type":"BUY",
+                    "disclosed_quantity": 0,
+                    "trigger_price":   0,
+                    "is_amo":          False,
+                },
+                timeout=15
+            )
+            data = resp.json()
+            if data.get("status") == "success":
+                order_id = data.get("data", {}).get("order_id")
+                log("[UPSTOX] ✅ BUY order: {}".format(order_id))
+                return {
+                    "symbol":    symbol,
+                    "trade_sym": trade_sym,
+                    "qty":       qty,
+                    "entry":     ltp,
+                    "order_id":  order_id,
+                    "broker":    "upstox",
+                    "peak":      ltp,
+                    "stop":      ltp * (1 - STOP_LOSS),
+                }
+            log("[UPSTOX] Order failed: {}".format(data))
+            return None
+        except Exception as e:
+            log("[UPSTOX] BUY error: {}".format(e))
+            return None
+
+    def sell_stock(self, position):
+        if not self.access_token:
+            log("[UPSTOX] No token — cannot sell")
+            return False
+
+        trade_sym = position.get("trade_sym", position.get("symbol"))
+        info      = self.UPSTOX_SYMBOLS.get(trade_sym)
+        if not info:
+            log("[UPSTOX] No symbol map for sell: {}".format(trade_sym))
+            return False
+
+        import requests
+        try:
+            resp = requests.post(
+                "https://api.upstox.com/v2/order/place",
+                headers={
+                    "Authorization": "Bearer {}".format(self.access_token),
+                    "Content-Type":  "application/json",
+                    "Accept":        "application/json",
+                },
+                json={
+                    "quantity":        position["qty"],
+                    "product":         "I",
+                    "validity":        "DAY",
+                    "price":           0,
+                    "instrument_token":"NSE_EQ|{}".format(info["symbol"]),
+                    "order_type":      "MARKET",
+                    "transaction_type":"SELL",
+                    "disclosed_quantity": 0,
+                    "trigger_price":   0,
+                    "is_amo":          False,
+                },
+                timeout=15
+            )
+            data = resp.json()
+            if data.get("status") == "success":
+                log("[UPSTOX] ✅ SELL order placed")
+                return True
+            log("[UPSTOX] SELL failed: {}".format(data))
+            return False
+        except Exception as e:
+            log("[UPSTOX] SELL error: {}".format(e))
+            return False
+
+
+# ── Main Trader ───────────────────────────────────────────
+class AdaptiveTrader:
+    def __init__(self, paper_mode=False):
+        self.paper_mode    = paper_mode
+        self.upstox        = UpstoxBroker()
+        self.angel         = None          # set via set_angel_broker()
+        self.positions     = []
+        self.daily_pnl     = 0.0
+        self.scan_count    = 0
+        self.trade_count   = 0
+        self._lock         = threading.Lock()
+
+        log("[TRADER] AdaptiveTrader init | Paper: {} | Symbols: {}".format(
+            paper_mode, len(SYMBOLS)))
+
+    def set_access_token(self, token):
+        """Called when Upstox OAuth completes."""
+        self.upstox.set_access_token(token)
+        log("[TRADER] Upstox activated — real orders enabled!")
+
+    def set_angel_broker(self, broker):
+        """Called by main.py when Angel One is ready."""
+        self.angel = broker
+        log("[TRADER] Angel One broker connected!")
+
+    def _active_broker(self):
+        """Return best available broker. Upstox first, Angel One backup."""
+        if self.upstox.access_token:
+            return self.upstox, "upstox"
+        if self.angel and self.angel.logged_in:
+            return self.angel, "angel"
+        return None, "paper"
+
+    def _get_data(self, symbol):
+        """Fetch 5-min candle data from yfinance."""
+        try:
+            ticker = yf.Ticker(symbol)
+            df     = ticker.history(period="2d", interval="5m")
+            if df.empty or len(df) < 20:
                 return None
-            df = pd.DataFrame({
-                'Open': raw['Open'].values.flatten(),
-                'High': raw['High'].values.flatten(),
-                'Low': raw['Low'].values.flatten(),
-                'Close': raw['Close'].values.flatten(),
-                'Volume': raw['Volume'].values.flatten()
-            }, index=raw.index)
             return df
         except Exception as e:
+            log("[DATA] Error for {}: {}".format(symbol, e))
             return None
 
     def check_entries(self):
-        if not self.is_trading_time():
-            return
-        if len(self.positions) >= MAX_POSITIONS:
-            return
-        if self.available_capital() < 500:
+        """Scan all symbols for entry signals."""
+        if not is_trading_time():
             return
 
-        # Already trading symbols
-        active_symbols = [p.symbol for p in self.positions]
+        broker, bname = self._active_broker()
+        capital_per   = STOCKS_CAP / max(MAX_POSITIONS, 1)
 
-        # Scan all symbols for signals
-        signals = []
-        for symbol in self.symbols:
-            if symbol in active_symbols:
-                continue
-            df = self.get_live_data(symbol)
-            if df is None or len(df) < BREAKOUT_PERIODS + 2:
-                continue
-            signal = self.strategy.get_signal(df)
-            if signal:
-                signals.append((symbol, signal))
+        for symbol in SYMBOLS:
+            with self._lock:
+                already_in = any(p["symbol"] == symbol for p in self.positions)
+                if already_in:
+                    continue
+                if len(self.positions) >= MAX_POSITIONS:
+                    break
 
-        if not signals:
-            return
+            if self.daily_pnl <= -MAX_LOSS_DAY:
+                log("[RISK] Daily loss limit hit — no new trades")
+                return
 
-        # Sort by score, take top ones
-        signals.sort(key=lambda x: x[1]['score'], reverse=True)
-        slots = MAX_POSITIONS - len(self.positions)
-        signals = signals[:slots]
-        allocations = self.allocate_capital(len(signals))
+            df    = self._get_data(symbol)
+            score, detail = get_signal(df, symbol=symbol, debug=True)
 
-        for idx, (symbol, signal) in enumerate(signals):
-            if idx >= len(allocations):
-                break
-            alloc = allocations[idx]
-            variant = self.ab_test.get_variant_for_trade() if AB_TEST_ENABLED else 'A'
-            params = self.ab_test.get_params(variant)
-            pos = Position(symbol, signal['price'], alloc, signal['score'], variant, params)
-            self.positions.append(pos)
-            now = datetime.now(IST).strftime('%H:%M:%S')
-            print("\n[{}] BUY {} | Score:{}/10 | Variant:{} | Rs.{:,.0f}".format(
-                now, symbol, signal['score'], variant, alloc))
-            self.notifier.trade_open(symbol, signal['price'], signal['score'], alloc, pos.hard_stop)
+            if score >= MIN_SCORE:
+                log("[SIGNAL] 🎯 {} Score:{}/10 — ENTERING!".format(symbol, score))
+
+                if self.paper_mode or broker is None:
+                    # Paper trade
+                    ltp = float(df["Close"].iloc[-1]) if df is not None else 0
+                    pos = {
+                        "symbol":  symbol,
+                        "qty":     max(1, int(capital_per / ltp)) if ltp else 1,
+                        "entry":   ltp,
+                        "peak":    ltp,
+                        "stop":    ltp * (1 - STOP_LOSS),
+                        "broker":  "paper",
+                        "score":   score,
+                        "trade_id": self.trade_count,
+                    }
+                    with self._lock:
+                        self.positions.append(pos)
+                    self.trade_count += 1
+                    log("[PAPER] 📝 BUY {} x {} @ Rs.{:.2f}".format(
+                        pos["qty"], symbol, ltp))
+                else:
+                    pos = broker.buy_stock(symbol, capital_per)
+                    if pos:
+                        pos["score"]    = score
+                        pos["trade_id"] = self.trade_count
+                        with self._lock:
+                            self.positions.append(pos)
+                        self.trade_count += 1
+                        log("[LIVE] ✅ {} BUY via {} | Score:{}/10".format(
+                            symbol, bname, score))
 
     def check_exits(self):
-        to_remove = []
-        for pos in self.positions:
-            df = self.get_live_data(pos.symbol)
-            if df is None:
-                continue
-            current_price = float(df['Close'].values.flatten()[-1])
-            now = datetime.now(IST).strftime('%H:%M:%S')
-            pos.update_trailing(current_price)
-            exit_trade, reason = pos.should_exit(current_price)
+        """Monitor positions for exit conditions."""
+        broker, bname = self._active_broker()
 
-            force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 15)
-            if exit_trade or force_exit:
-                reason = reason or 'TIME_EXIT'
-                pnl = (current_price - pos.entry_price) / pos.entry_price * pos.capital
-                self.capital += pnl
-                self.daily_pnl += pnl
-                icon = "WIN" if pnl >= 0 else "LOSS"
-                trade = {
-                    'symbol': pos.symbol,
-                    'entry_time': pos.entry_time,
-                    'exit_time': now,
-                    'entry_price': pos.entry_price,
-                    'exit_price': current_price,
-                    'pnl': round(pnl, 2),
-                    'pnl_pct': round((current_price-pos.entry_price)/pos.entry_price*100, 4),
-                    'reason': reason,
-                    'variant': pos.variant
-                }
-                self.daily_trades.append(trade)
-                print("\n[{}] {} {} | P&L: Rs.{:+.2f} | Capital: Rs.{:,.0f}".format(
-                    now, icon, pos.symbol, pnl, self.capital))
-                self.notifier.trade_close(pos.symbol, pos.entry_price, current_price, pnl, reason, self.capital)
-                if AB_TEST_ENABLED:
-                    self.ab_test.log_trade(pos.variant, trade)
-                if DB_AVAILABLE:
-                    try:
-                        log_trade(trade)
-                    except:
-                        pass
-                to_remove.append(pos)
-                if self.daily_pnl <= -MAX_LOSS_PER_DAY:
-                    print("\nDAILY LOSS LIMIT HIT - Stopping")
-                    self.print_summary()
-                    exit(0)
-
-        for pos in to_remove:
-            self.positions.remove(pos)
-
-    def print_summary(self):
-        wins = len([t for t in self.daily_trades if t['pnl'] > 0])
-        losses = len([t for t in self.daily_trades if t['pnl'] <= 0])
-        print("\n=== {} {} DAILY SUMMARY ===".format(BOT_NAME, BOT_EMOJI))
-        print("Trades: {} (W:{} L:{})".format(len(self.daily_trades), wins, losses))
-        print("P&L: Rs.{:.2f}".format(self.daily_pnl))
-        print("Capital: Rs.{:,.2f}".format(self.capital))
-        self.notifier.daily_summary(self.daily_trades, self.capital, self.start_capital)
-
-    def run(self):
-        self.notifier.market_open(self.capital, 'A+B')
-        print("\nScanning {} symbols every 5 mins...".format(len(self.symbols)))
-        while True:
-            try:
-                if not self.is_market_open():
-                    now = datetime.now(IST)
-                    if now.hour >= 15 and now.minute >= 30:
-                        print("\nMarket closed.")
-                        self.print_summary()
-                        break
-                    time.sleep(60)
+        with self._lock:
+            to_exit = []
+            for pos in self.positions:
+                symbol = pos.get("symbol", "")
+                df     = self._get_data(symbol)
+                if df is None:
                     continue
 
-                self.check_exits()
-                self.check_entries()
+                ltp = float(df["Close"].iloc[-1])
 
-                now = datetime.now(IST).strftime('%H:%M:%S')
-                active = ", ".join([p.symbol.split(".")[0].replace("^","") for p in self.positions]) or "none"
-                print("[{}] Positions: {} | Capital: Rs.{:,.0f} | Daily: Rs.{:.0f}".format(
-                    now, active, self.capital, self.daily_pnl))
+                # Update peak (for trailing stop)
+                if ltp > pos.get("peak", ltp):
+                    pos["peak"] = ltp
 
-                time.sleep(int(os.environ.get("SCAN_INTERVAL", 60)))
+                # Trailing stop
+                trail_stop = pos["peak"] * (1 - TRAIL_PCT)
+                stop       = max(pos.get("stop", 0), trail_stop)
+
+                pnl     = (ltp - pos["entry"]) * pos["qty"]
+                pnl_pct = (ltp - pos["entry"]) / pos["entry"] * 100
+
+                # Exit conditions
+                exit_reason = None
+                if ltp <= stop:
+                    exit_reason = "STOP ({:.1f}%)".format(pnl_pct)
+                elif not is_trading_time():
+                    exit_reason = "EOD SQUAREOFF"
+                elif pnl_pct >= 1.0:
+                    exit_reason = "TARGET (+{:.1f}%)".format(pnl_pct)
+
+                if exit_reason:
+                    to_exit.append((pos, ltp, pnl, exit_reason))
+
+        for pos, ltp, pnl, reason in to_exit:
+            log("[EXIT] {} {} @ Rs.{:.2f} | PnL: Rs.{:.2f} | {}".format(
+                pos["symbol"], pos.get("broker", "?").upper(), ltp, pnl, reason))
+
+            exited = False
+            if self.paper_mode or pos.get("broker") == "paper":
+                exited = True
+                log("[PAPER] 📝 SELL {} @ Rs.{:.2f}".format(pos["symbol"], ltp))
+            elif broker:
+                exited = broker.sell_stock(pos)
+
+            if exited:
+                self.daily_pnl += pnl
+                with self._lock:
+                    if pos in self.positions:
+                        self.positions.remove(pos)
+                log("[PNL] Daily PnL: Rs.{:.2f}".format(self.daily_pnl))
+
+    def run(self):
+        """Main scan loop — runs forever until process stops."""
+        log("[TRADER] 🚀 Starting scan loop (interval: {}s)".format(SCAN_INTERVAL))
+        log("[TRADER] Symbols: {}".format(SYMBOLS))
+        log("[TRADER] Options: {}".format("Enabled" if OPTIONS_ENABLED else "Disabled"))
+
+        while True:
+            try:
+                self.scan_count += 1
+                now = ist_now()
+
+                if is_market_open():
+                    log("[SCAN #{:04d}] {} | Positions: {} | PnL: Rs.{:.2f}".format(
+                        self.scan_count, now.strftime("%H:%M:%S"),
+                        len(self.positions), self.daily_pnl))
+
+                    self.check_entries()
+                    self.check_exits()
+
+                    # Options trading
+                    if OPTIONS_ENABLED:
+                        try:
+                            from options_trader import MultiOptionsTrader
+                            broker, bname = self._active_broker()
+                            opt_trader = getattr(self, "_opt_trader", None)
+                            if opt_trader is None:
+                                self._opt_trader = MultiOptionsTrader(broker=broker)
+                                opt_trader = self._opt_trader
+                            opt_trader.scan()
+                        except ImportError:
+                            pass
+                        except Exception as e:
+                            log("[OPTIONS] Error: {}".format(e))
+
+                elif now.hour >= 15 and now.minute >= 30:
+                    # After 3:30 PM — end of day
+                    if self.positions:
+                        log("[EOD] Squaring off {} positions...".format(len(self.positions)))
+                        self.check_exits()
+                    if self.scan_count % 60 == 0:
+                        log("[EOD] Market closed. Daily PnL: Rs.{:.2f}".format(self.daily_pnl))
+                else:
+                    if self.scan_count % 30 == 1:
+                        log("[WAIT] Market opens at 9:15 AM IST")
+
+                time.sleep(SCAN_INTERVAL)
 
             except KeyboardInterrupt:
-                print("\nStopped.")
-                self.print_summary()
+                log("[TRADER] Stopping...")
                 break
             except Exception as e:
-                print("Error: {} - retrying in 60s".format(e))
-                time.sleep(60)
-
-if __name__ == '__main__':
-    trader = AdaptiveTrader()
-    trader.run()
+                log("[TRADER] Scan error: {}".format(e))
+                import traceback
+                traceback.print_exc()
+                time.sleep(10)  # Wait before retry
