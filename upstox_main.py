@@ -37,6 +37,9 @@ if not os.environ.get('UPSTOX_ACCESS_TOKEN'):
 else:
     print("Token found — skipping auto-login.")
 
+import api_server
+api_server.start(port=8080)
+
 from upstox_live_trader import UpstoxLiveTrader
 trader = UpstoxLiveTrader()
 trader.run()

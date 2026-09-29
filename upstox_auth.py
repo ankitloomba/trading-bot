@@ -27,6 +27,19 @@ ACCESS_TOKEN = None
 TOKEN_EXPIRY = None
 _token_callbacks = []
 
+# Live state updated by trader every scan cycle
+_live_state = {
+    'status': 'STARTING',
+    'capital': 0,
+    'daily_pnl': 0,
+    'positions': [],
+    'options': [],
+    'last_scan': None,
+}
+
+def update_live_state(**kwargs):
+    _live_state.update(kwargs)
+
 def on_token(callback):
     """Register a callback to be called when token is obtained."""
     _token_callbacks.append(callback)
@@ -155,13 +168,85 @@ def schedule_daily_login():
     thread = threading.Thread(target=loop, daemon=True)
     thread.start()
 
+def _db_query(sql, params=()):
+    try:
+        import psycopg2, os
+        conn = psycopg2.connect(os.environ.get('DATABASE_URL'))
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        cur.close(); conn.close()
+        return rows
+    except Exception:
+        return []
+
+def _json_response(handler, data, status=200):
+    import json
+    body = json.dumps(data, default=str).encode()
+    handler.send_response(status)
+    handler.send_header('Content-Type', 'application/json')
+    handler.send_header('Access-Control-Allow-Origin', '*')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
 class AuthHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): pass
 
     def do_GET(self):
         global ACCESS_TOKEN
         parsed = urlparse(self.path)
+        path = parsed.path
         params = parse_qs(parsed.query)
+
+        # ── API endpoints ──────────────────────────────────
+        if path == '/api/status':
+            _json_response(self, _live_state)
+            return
+
+        if path == '/api/trades':
+            today = datetime.now(IST).strftime('%Y-%m-%d')
+            rows = _db_query(
+                "SELECT * FROM trades WHERE DATE(created_at AT TIME ZONE 'Asia/Kolkata') = %s ORDER BY created_at DESC",
+                (today,)
+            )
+            _json_response(self, {'date': today, 'trades': rows, 'count': len(rows)})
+            return
+
+        if path == '/api/summary':
+            rows = _db_query("SELECT * FROM daily_summary ORDER BY date DESC LIMIT 30")
+            _json_response(self, {'history': rows})
+            return
+
+        if path == '/health':
+            _json_response(self, {'ok': True, 'time': datetime.now(IST).strftime('%H:%M:%S IST')})
+            return
+
+        # ── Dashboard static files ─────────────────────────
+        import os as _os
+        dashboard_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'dashboard')
+        if path == '/' or path == '/dashboard' or path == '/dashboard/':
+            file_path = _os.path.join(dashboard_dir, 'index.html')
+            content_type = 'text/html'
+        elif path == '/manifest.json':
+            file_path = _os.path.join(dashboard_dir, 'manifest.json')
+            content_type = 'application/json'
+        else:
+            file_path = None
+            content_type = None
+
+        if file_path and _os.path.exists(file_path):
+            with open(file_path, 'rb') as f:
+                body = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # ── OAuth callback ─────────────────────────────────
         auth_code = params.get('code', [None])[0]
 
         if auth_code:

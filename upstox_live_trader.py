@@ -428,6 +428,30 @@ class AdaptiveTrader:
                 ]) or "none"
                 print("[{}] Stocks:{} | Options:{} | Capital:Rs.{:,.0f} | Daily:Rs.{:.0f}".format(
                     now, stocks, opts, self.capital, self.daily_pnl))
+
+                # Push live state to dashboard API
+                try:
+                    import upstox_auth
+                    pos_list = [
+                        {
+                            'symbol':        p.symbol,
+                            'entry_price':   p.entry_price,
+                            'current_price': getattr(p, 'current_price', p.entry_price),
+                            'pnl':           getattr(p, 'unrealized_pnl', 0),
+                            'pnl_pct':       getattr(p, 'unrealized_pnl_pct', 0),
+                        } for p in self.positions
+                    ]
+                    upstox_auth.update_live_state(
+                        status='LIVE',
+                        capital=self.capital,
+                        daily_pnl=self.daily_pnl,
+                        positions=pos_list,
+                        options=self.options_positions,
+                        last_scan=datetime.now(IST).strftime('%H:%M:%S'),
+                    )
+                except Exception:
+                    pass
+
                 time.sleep(self.scan_interval)
 
             except KeyboardInterrupt:
