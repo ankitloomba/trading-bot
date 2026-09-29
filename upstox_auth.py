@@ -25,6 +25,25 @@ BASE_URL = "https://api.upstox.com/v2"
 
 ACCESS_TOKEN = None
 TOKEN_EXPIRY = None
+_token_callbacks = []
+
+def on_token(callback):
+    """Register a callback to be called when token is obtained."""
+    _token_callbacks.append(callback)
+
+def get_upstox_token():
+    return ACCESS_TOKEN
+
+def set_angel_broker(angel_broker):
+    """Stub — Angel One status shown on page if needed."""
+    pass
+
+def _fire_token_callbacks(token):
+    for cb in _token_callbacks:
+        try:
+            cb(token)
+        except Exception as e:
+            print(f"[AUTH] Token callback error: {e}")
 
 def get_totp():
     return pyotp.TOTP(TOTP_SECRET).now()
@@ -71,6 +90,7 @@ def auto_login():
             if token:
                 ACCESS_TOKEN = token
                 os.environ['UPSTOX_ACCESS_TOKEN'] = token
+                _fire_token_callbacks(token)
                 print("[AUTH] Auto-login successful!")
                 return True
         
@@ -150,6 +170,7 @@ class AuthHandler(BaseHTTPRequestHandler):
             if token:
                 ACCESS_TOKEN = token
                 os.environ['UPSTOX_ACCESS_TOKEN'] = token
+                _fire_token_callbacks(token)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html')
                 self.end_headers()

@@ -70,7 +70,7 @@ def main():
         import upstox_auth
         if angel_broker:
             upstox_auth.set_angel_broker(angel_broker)
-        upstox_auth.start_auth_server()
+        upstox_auth.run_in_background()   # non-blocking — starts server in thread
     except Exception as e:
         log("[AUTH] Auth server error: {}".format(e))
 
