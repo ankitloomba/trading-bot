@@ -25,6 +25,18 @@ try:
 except Exception as e:
     print("Database: Unavailable")
 
+# ── Auto-login if no token present ────────────────────────────────────────
+if not os.environ.get('UPSTOX_ACCESS_TOKEN'):
+    print("No UPSTOX_ACCESS_TOKEN found — attempting auto-login...")
+    try:
+        from auto_login import run as do_auto_login
+        do_auto_login()
+        print("Auto-login complete.")
+    except Exception as e:
+        print("Auto-login failed: {} — manual login needed".format(e))
+else:
+    print("Token found — skipping auto-login.")
+
 from upstox_live_trader import UpstoxLiveTrader
 trader = UpstoxLiveTrader()
 trader.run()
