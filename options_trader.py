@@ -213,10 +213,17 @@ class MultiOptionsTrader:
                     current_premium, trail_floor, pnl))
                 return True, 'TRAIL_STOP', pnl
 
-        # 4. Time stop: held 25+ min and still a loser or barely moving
-        if held_min >= 25 and pnl_pct < 10:
-            print("[OPTIONS] ⏱ TIME_STOP | {:.0f}min held, only {:.1f}% gain | P&L: Rs.{:+.0f}".format(
+        # 4. Time stop — only cuts LOSERS, never slow winners
+        #    25 min and still down → exit (theta kills losing options)
+        #    45 min and not yet green → exit (capital better deployed elsewhere)
+        #    Green at all → hold, let profit target / trail decide
+        if pnl_pct < 0 and held_min >= 25:
+            print("[OPTIONS] ⏱ TIME_STOP | {:.0f}min held, still losing {:.1f}% | P&L: Rs.{:+.0f}".format(
                 held_min, pnl_pct, pnl))
+            return True, 'TIME_STOP', pnl
+        if pnl_pct <= 0 and held_min >= 45:
+            print("[OPTIONS] ⏱ TIME_STOP | {:.0f}min held, still at breakeven | P&L: Rs.{:+.0f}".format(
+                held_min, pnl))
             return True, 'TIME_STOP', pnl
 
         # 5. Hard stop: 25% loss (tighter than before)

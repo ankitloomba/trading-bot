@@ -76,8 +76,13 @@ class Position:
             if current_price < trail_stop:
                 return True, 'TRAIL_STOP'
 
-        # 4. Time stop: flat/losing after 40 min
-        if held_min >= 40 and pnl_pct < 0.002:
+        # 4. Time stop — only cuts losers/flat, never slow winners
+        #    30 min and down → exit
+        #    60 min and still not green → exit
+        #    Positive at all → hold, let profit target / trail decide
+        if pnl_pct < 0 and held_min >= 30:
+            return True, 'TIME_STOP'
+        if pnl_pct <= 0.001 and held_min >= 60:
             return True, 'TIME_STOP'
 
         # 5. Hard stop
