@@ -5,6 +5,9 @@ SYMBOLS = [
     "RELIANCE.NS",
     "HDFCBANK.NS",
     "INFY.NS",
+    "TCS.NS",
+    "ICICIBANK.NS",
+    "SBIN.NS",
 ]
 
 # Options - which indices to trade options on
