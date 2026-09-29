@@ -10,6 +10,19 @@ SYMBOLS = [
 # Options - which indices to trade options on
 OPTIONS_SYMBOLS = ["^NSEBANK", "^NSEI", "^CNXIT"]
 
+# Upstox instrument keys — maps Yahoo-style tickers to Upstox API keys
+INSTRUMENT_KEYS = {
+    "^NSEBANK":    "NSE_INDEX|Nifty Bank",
+    "^NSEI":       "NSE_INDEX|Nifty 50",
+    "^CNXIT":      "NSE_INDEX|Nifty IT",
+    "RELIANCE.NS": "NSE_EQ|INE002A01018",
+    "HDFCBANK.NS": "NSE_EQ|INE040A01034",
+    "INFY.NS":     "NSE_EQ|INE009A01021",
+    "TCS.NS":      "NSE_EQ|INE467B01029",
+    "ICICIBANK.NS":"NSE_EQ|INE090A01021",
+    "SBIN.NS":     "NSE_EQ|INE062A01020",
+}
+
 STARTING_CAPITAL = 5000
 MAX_POSITIONS = 3
 BUFFER_CASH = 500

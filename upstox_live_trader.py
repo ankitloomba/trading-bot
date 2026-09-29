@@ -1,7 +1,8 @@
 import os
 import time
-import yfinance as yf
+import requests
 import pandas as pd
+from urllib.parse import quote
 from datetime import datetime
 import pytz
 
@@ -137,27 +138,52 @@ class AdaptiveTrader:
         return self.capital - used - opts_used - BUFFER_CASH
 
     def get_live_data(self, symbol):
+        """Fetch today's 1-min intraday candles from Upstox API, resampled to 5-min."""
+        # Resolve access token from broker or env
+        token = None
+        if self.broker:
+            token = getattr(self.broker, 'token', None)
+        if not token:
+            token = os.environ.get('UPSTOX_ACCESS_TOKEN')
+        if not token:
+            return None  # Waiting for Upstox login
+
+        instrument_key = INSTRUMENT_KEYS.get(symbol)
+        if not instrument_key:
+            return None
+
         try:
-            # Use Ticker.history() — handles Yahoo Finance crumb/cookies better
-            ticker = yf.Ticker(symbol)
-            raw = ticker.history(period='1d', interval='5m')
-            if raw is None or raw.empty:
-                # Fallback to download()
-                raw = yf.download(symbol, period='1d', interval='5m', progress=False)
-            if raw is None or raw.empty:
+            url = (
+                "https://api.upstox.com/v2/historical-candle/intraday/"
+                + quote(instrument_key, safe='')
+                + "/1minute"
+            )
+            resp = requests.get(url, headers={
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json'
+            }, timeout=10)
+            data = resp.json()
+            if data.get('status') != 'success':
+                print(f"[DATA] {symbol}: {data.get('message', 'API error')}")
                 return None
-            # Normalise column names (Ticker.history returns Title Case)
-            col_map = {c: c.title() for c in raw.columns}
-            raw = raw.rename(columns=col_map)
-            return pd.DataFrame({
-                'Open':   raw['Open'].values.flatten(),
-                'High':   raw['High'].values.flatten(),
-                'Low':    raw['Low'].values.flatten(),
-                'Close':  raw['Close'].values.flatten(),
-                'Volume': raw['Volume'].values.flatten()
-            }, index=raw.index)
+            candles = data['data']['candles']
+            if not candles:
+                return None
+
+            # candles: [timestamp, open, high, low, close, volume, oi]
+            df = pd.DataFrame(candles,
+                              columns=['ts', 'Open', 'High', 'Low', 'Close', 'Volume', 'OI'])
+            df['ts'] = pd.to_datetime(df['ts'], utc=True).dt.tz_convert('Asia/Kolkata')
+            df = df.set_index('ts').sort_index()
+
+            # Resample 1-min → 5-min OHLCV
+            df5 = df[['Open', 'High', 'Low', 'Close', 'Volume']].resample('5min').agg({
+                'Open': 'first', 'High': 'max',
+                'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+            }).dropna()
+            return df5
         except Exception as e:
-            print(f"[DATA] {symbol} fetch error: {e}")
+            print(f"[DATA] {symbol} error: {e}")
             return None
 
     def check_options(self):
