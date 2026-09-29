@@ -1,7 +1,7 @@
 """
 Multi-Index Options Trader (Bank Nifty, Nifty 50, Nifty IT)
 - Buys CE for bullish signals, PE for bearish
-- Profit target: 100% gain on premium → exit
+- Profit target: 200% gain on premium → exit (trailing stop rides beyond)
 - Trailing stop: 30% drop from peak (after 10% gain)
 - Hard stop: 40% loss of premium
 - Capital: ~₹3,000 per options trade
@@ -216,9 +216,11 @@ class MultiOptionsTrader:
         pnl_pct = (current_premium - entry) / entry * 100
         held_min = (datetime.now(IST) - position['entry_time']).seconds / 60
 
-        # 1. Profit target: premium doubled
-        if current_premium >= entry * 2.0:
-            print("[OPTIONS] 🎯 PROFIT TARGET! +{:.1f}% | P&L: Rs.{:+.0f}".format(pnl_pct, pnl))
+        # 1. Profit target: 200% gain (3x premium) — guaranteed exit
+        #    Below this the trailing stop rides the move.
+        #    If option goes 300%, trailing stop exits ~270% (10% from peak).
+        if current_premium >= entry * 3.0:
+            print("[OPTIONS] 🎯 PROFIT TARGET 200%! +{:.1f}% | P&L: Rs.{:+.0f}".format(pnl_pct, pnl))
             return True, 'PROFIT_TARGET', pnl
 
         # 2. Breakeven stop: once up by hard_stop_pct (same as the stop distance),
