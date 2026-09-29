@@ -223,6 +223,41 @@ class AuthHandler(BaseHTTPRequestHandler):
             _json_response(self, {'ok': True, 'time': datetime.now(IST).strftime('%H:%M:%S IST')})
             return
 
+        if path == '/api/clear-dummy':
+            # One-time: delete all trades/summaries that are dummy/test data
+            # Keeps only rows where pnl is non-null and entry_price > 0
+            try:
+                import psycopg2, os as _os2
+                conn = psycopg2.connect(_os2.environ.get('DATABASE_URL'))
+                cur = conn.cursor()
+                cur.execute("DELETE FROM trades WHERE entry_price IS NULL OR entry_price = 0 OR pnl IS NULL")
+                deleted_trades = cur.rowcount
+                cur.execute("DELETE FROM daily_summary WHERE total_trades = 0 OR total_pnl IS NULL")
+                deleted_summary = cur.rowcount
+                conn.commit()
+                cur.close(); conn.close()
+                _json_response(self, {'cleared': True, 'trades_deleted': deleted_trades, 'summary_deleted': deleted_summary})
+            except Exception as e:
+                _json_response(self, {'error': str(e)}, 500)
+            return
+
+        if path == '/api/wipe-all':
+            # Nuclear: delete everything — use once to start fresh
+            try:
+                import psycopg2, os as _os3
+                conn = psycopg2.connect(_os3.environ.get('DATABASE_URL'))
+                cur = conn.cursor()
+                cur.execute("DELETE FROM trades")
+                t = cur.rowcount
+                cur.execute("DELETE FROM daily_summary")
+                s = cur.rowcount
+                conn.commit()
+                cur.close(); conn.close()
+                _json_response(self, {'wiped': True, 'trades': t, 'summaries': s})
+            except Exception as e:
+                _json_response(self, {'error': str(e)}, 500)
+            return
+
         # ── Dashboard static files ─────────────────────────
         import os as _os
         dashboard_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'dashboard')
