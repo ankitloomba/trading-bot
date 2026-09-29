@@ -138,17 +138,26 @@ class AdaptiveTrader:
 
     def get_live_data(self, symbol):
         try:
-            raw = yf.download(symbol, period='1d', interval='5m', progress=False)
-            if raw.empty:
+            # Use Ticker.history() — handles Yahoo Finance crumb/cookies better
+            ticker = yf.Ticker(symbol)
+            raw = ticker.history(period='1d', interval='5m')
+            if raw is None or raw.empty:
+                # Fallback to download()
+                raw = yf.download(symbol, period='1d', interval='5m', progress=False)
+            if raw is None or raw.empty:
                 return None
+            # Normalise column names (Ticker.history returns Title Case)
+            col_map = {c: c.title() for c in raw.columns}
+            raw = raw.rename(columns=col_map)
             return pd.DataFrame({
-                'Open': raw['Open'].values.flatten(),
-                'High': raw['High'].values.flatten(),
-                'Low': raw['Low'].values.flatten(),
-                'Close': raw['Close'].values.flatten(),
+                'Open':   raw['Open'].values.flatten(),
+                'High':   raw['High'].values.flatten(),
+                'Low':    raw['Low'].values.flatten(),
+                'Close':  raw['Close'].values.flatten(),
                 'Volume': raw['Volume'].values.flatten()
             }, index=raw.index)
-        except:
+        except Exception as e:
+            print(f"[DATA] {symbol} fetch error: {e}")
             return None
 
     def check_options(self):
