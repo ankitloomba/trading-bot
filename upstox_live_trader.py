@@ -60,13 +60,15 @@ class Position:
 
 
 class AdaptiveTrader:
-    def __init__(self):
+    def __init__(self, paper_mode=False):
+        self.paper_mode = paper_mode
         self.strategy = BreakoutStrategy()
         self.notifier = Notifier()
         self.ab_test = ABTest()
         self.positions = []
         self.options_position = None
         self.broker = None
+        self.angel_broker = None
         self.options_trader = None
         self.daily_trades = []
         self.daily_pnl = 0
@@ -95,7 +97,15 @@ class AdaptiveTrader:
         print(f"Interval:  {self.scan_interval}s")
         print("="*60)
 
+    def set_angel_broker(self, angel_broker):
+        """Set Angel One as backup/primary broker."""
+        self.angel_broker = angel_broker
+        print("[TRADER] Angel One broker attached as backup")
+
     def set_access_token(self, token):
+        if self.paper_mode:
+            print("[BROKER] Paper mode — skipping real broker setup")
+            return
         if BROKER_AVAILABLE and token:
             self.broker = UpstoxBroker(token)
             print("[BROKER] ✅ Real stock orders enabled!")
