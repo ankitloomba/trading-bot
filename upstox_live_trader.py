@@ -43,8 +43,10 @@ class Position:
         self.highest_price = entry_price
         self.entry_time = datetime.now(IST).strftime('%H:%M:%S')
         self.hard_stop = entry_price * (1 - params['stop_loss'])
+        self.last_price = entry_price  # updated on each exit check
 
     def update_trailing(self, current_price):
+        self.last_price = current_price
         self.highest_price = max(self.highest_price, current_price)
 
     def should_exit(self, current_price):
@@ -85,6 +87,13 @@ class AdaptiveTrader:
                 print("Database: Connected")
             except Exception as e:
                 print(f"Database: {e}")
+
+    @property
+    def unrealized_pnl(self):
+        return sum(
+            (p.last_price - p.entry_price) / p.entry_price * p.capital
+            for p in self.positions
+        )
 
         print("\n" + "="*60)
         print(f"  {BOT_NAME} {BOT_EMOJI} - MULTI-SYMBOL + OPTIONS TRADER")

@@ -152,9 +152,11 @@ def main():
                 pass
 
             if trader:
-                log("[TRADER] Positions: {} | PnL: Rs.{:.2f}".format(
-                    len(getattr(trader, "positions", [])),
-                    getattr(trader, "daily_pnl", 0.0)
+                n_pos = len(getattr(trader, "positions", []))
+                realized = getattr(trader, "daily_pnl", 0.0)
+                unrealized = getattr(trader, "unrealized_pnl", 0.0)
+                log("[TRADER] Positions: {} | Realized: Rs.{:.2f} | Unrealized: Rs.{:.2f}".format(
+                    n_pos, realized, unrealized
                 ))
 
     status_thread = threading.Thread(target=_status_loop, daemon=True)
