@@ -46,6 +46,30 @@ class MultiOptionsTrader:
         expiry = today + timedelta(days=days_ahead)
         return expiry.strftime('%y%b%d').upper()  # e.g. 26OCT02
 
+    def dynamic_hard_stop(self, entry_premium):
+        """
+        Stop % inversely scales with premium.
+        Cheap options have huge % noise on small moves → need wider stop.
+        Expensive options are more stable per point → tighter stop is fine.
+
+        Premium   Hard stop   Rupee loss on 1 BN lot (15 units)
+        < ₹50     40%         ₹300 max
+        ₹50–80    35%         ₹263–420 max
+        ₹80–120   28%         ₹336–504 max
+        ₹120–180  22%         ₹396–594 max
+        > ₹180    18%         > ₹486 max
+        """
+        if entry_premium < 50:
+            return 0.40
+        elif entry_premium < 80:
+            return 0.35
+        elif entry_premium < 120:
+            return 0.28
+        elif entry_premium < 180:
+            return 0.22
+        else:
+            return 0.18
+
     def get_atm_strike(self, spot_price, step):
         """Round to nearest strike step."""
         return round(spot_price / step) * step
@@ -135,6 +159,9 @@ class MultiOptionsTrader:
                 order_id = data['data']['order_id']
                 print("[OPTIONS] ✅ Order placed! ID:{} | {}-{} @ Rs.{}".format(
                     order_id, index_name, option_type, premium))
+                stop_pct = self.dynamic_hard_stop(premium)
+                print("[OPTIONS] Dynamic stop: {:.0f}% (premium Rs.{:.0f})".format(
+                    stop_pct * 100, premium))
                 return {
                     'order_id': order_id,
                     'instrument_key': instrument_key,
@@ -144,6 +171,7 @@ class MultiOptionsTrader:
                     'strike': strike,
                     'entry_premium': premium,
                     'highest_premium': premium,
+                    'hard_stop_pct': stop_pct,
                     'lot_size': lot_size,
                     'capital_used': cost
                 }
@@ -193,9 +221,13 @@ class MultiOptionsTrader:
             print("[OPTIONS] 🎯 PROFIT TARGET! +{:.1f}% | P&L: Rs.{:+.0f}".format(pnl_pct, pnl))
             return True, 'PROFIT_TARGET', pnl
 
-        # 2. Breakeven stop: once up 25%, never let it go below entry
-        if peak >= entry * 1.25 and current_premium <= entry:
-            print("[OPTIONS] 🔒 BREAKEVEN_STOP | Was up, now back to entry | P&L: Rs.{:+.0f}".format(pnl))
+        # 2. Breakeven stop: once up by hard_stop_pct (same as the stop distance),
+        #    never let it fall back to entry — risk-free from here
+        stop_pct = position.get('hard_stop_pct', 0.28)
+        breakeven_trigger = 1 + stop_pct  # e.g. stop=28% → trigger at +28% gain
+        if peak >= entry * breakeven_trigger and current_premium <= entry:
+            print("[OPTIONS] 🔒 BREAKEVEN_STOP | Peaked +{:.0f}%, now back to entry | P&L: Rs.{:+.0f}".format(
+                (peak / entry - 1) * 100, pnl))
             return True, 'BREAKEVEN_STOP', pnl
 
         # 3. Dynamic trailing stop — tightens as profit grows
@@ -226,9 +258,11 @@ class MultiOptionsTrader:
                 held_min, pnl))
             return True, 'TIME_STOP', pnl
 
-        # 5. Hard stop: 25% loss (tighter than before)
-        if current_premium < entry * 0.75:
-            print("[OPTIONS] 🛑 HARD_STOP | Rs.{:.2f} | Loss: Rs.{:.0f}".format(current_premium, pnl))
+        # 5. Dynamic hard stop — % set at entry based on premium level
+        stop_pct = position.get('hard_stop_pct', 0.28)  # fallback 28%
+        if current_premium < entry * (1 - stop_pct):
+            print("[OPTIONS] 🛑 HARD_STOP ({:.0f}%) | Rs.{:.2f} | Loss: Rs.{:.0f}".format(
+                stop_pct * 100, current_premium, pnl))
             return True, 'HARD_STOP', pnl
 
         print("[OPTIONS] Holding {}-{} | Rs.{:.2f} | {:+.1f}% (Rs.{:+.0f}) | {:.0f}min".format(
