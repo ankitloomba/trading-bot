@@ -69,7 +69,7 @@ class AdaptiveTrader:
         self.notifier = Notifier()
         self.ab_test = ABTest()
         self.positions = []
-        self.options_position = None
+        self.options_positions = []  # list — allows up to 2 concurrent options
         self.broker = None
         self.angel_broker = None
         self.options_trader = None
@@ -143,7 +143,7 @@ class AdaptiveTrader:
 
     def available_capital(self):
         used = sum(p.capital for p in self.positions)
-        opts_used = OPTIONS_CAPITAL if self.options_position else 0
+        opts_used = OPTIONS_CAPITAL * len(self.options_positions)
         return self.capital - used - opts_used - BUFFER_CASH
 
     def get_live_data(self, symbol):
@@ -199,45 +199,58 @@ class AdaptiveTrader:
         if not self.options_trader:
             return
 
-        # Exit existing options position
-        if self.options_position:
-            exit_trade, reason, pnl = self.options_trader.should_exit_option(self.options_position)
-            force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 10)
+        # Exit options positions that hit stop/target/time
+        now_str = datetime.now(IST).strftime('%H:%M:%S')
+        force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 10)
+        to_close = []
+        for opt_pos in self.options_positions:
+            exit_trade, reason, pnl = self.options_trader.should_exit_option(opt_pos)
             if exit_trade or force_exit:
                 reason = reason or 'TIME_EXIT'
-                self.options_trader.sell_option(self.options_position)
-                entry = self.options_position['entry_premium']
+                self.options_trader.sell_option(opt_pos)
                 actual_pnl = pnl if pnl != 0 else 0
                 self.capital += actual_pnl
                 self.daily_pnl += actual_pnl
-                now = datetime.now(IST).strftime('%H:%M:%S')
                 icon = "WIN" if actual_pnl >= 0 else "LOSS"
-                print(f"\n[{now}] OPTIONS {icon} | P&L: Rs.{actual_pnl:+.2f} | {reason}")
+                label = "{}-{}".format(opt_pos['index_name'], opt_pos['option_type'])
+                print("\n[{}] OPTIONS {} | {} | P&L: Rs.{:+.2f} | {}".format(
+                    now_str, icon, label, actual_pnl, reason))
                 self.notifier.trade_close(
-                    f"{self.options_position['index_name']}-{self.options_position['option_type']}",
-                    entry, entry, actual_pnl, reason, self.capital)
-                self.options_position = None
+                    label, opt_pos['entry_premium'], opt_pos['entry_premium'],
+                    actual_pnl, reason, self.capital)
+                to_close.append(opt_pos)
+        for op in to_close:
+            self.options_positions.remove(op)
 
-        # Enter new options position
-        if (not self.options_position and self.is_trading_time() and
+        # Enter new options positions (up to OPTIONS_MAX_POSITIONS = 2)
+        max_opts = getattr(self, '_opts_max', 2)
+        if (len(self.options_positions) < max_opts and self.is_trading_time() and
                 self.capital - BUFFER_CASH - OPTIONS_CAPITAL > 0):
+            active_opt_symbols = [op['index_symbol'] for op in self.options_positions]
             for opt_symbol in OPTIONS_SYMBOLS:
+                if opt_symbol in active_opt_symbols:
+                    continue
+                if len(self.options_positions) >= max_opts:
+                    break
                 df = self.get_live_data(opt_symbol)
                 if df is None or len(df) < BREAKOUT_PERIODS + 2:
                     continue
                 signal = self.strategy.get_signal(df, symbol=opt_symbol, debug=False)
                 if signal and signal['score'] >= self.min_score:
-                    now = datetime.now(IST).strftime('%H:%M:%S')
-                    print(f"\n[{now}] OPTIONS SIGNAL {opt_symbol} | Score:{signal['score']}/10")
-                    pos = self.options_trader.buy_option(opt_symbol, signal['price'], 'BUY')
+                    now_str = datetime.now(IST).strftime('%H:%M:%S')
+                    sig_type = signal['type']  # 'BUY' or 'SELL'
+                    opt_type = 'CE' if sig_type == 'BUY' else 'PE'
+                    print("\n[{}] OPTIONS SIGNAL {} | Type:{} | Score:{}/10".format(
+                        now_str, opt_symbol, sig_type, signal['score']))
+                    pos = self.options_trader.buy_option(opt_symbol, signal['price'], sig_type)
                     if pos:
-                        self.options_position = pos
+                        pos['index_symbol'] = opt_symbol
+                        self.options_positions.append(pos)
                         self.notifier.trade_open(
-                            f"{pos['index_name']}-CE",
+                            "{}-{}".format(pos['index_name'], opt_type),
                             pos['entry_premium'],
                             signal['score'],
                             OPTIONS_CAPITAL, 0)
-                    break
 
     def check_entries(self):
         if not self.is_trading_time():
@@ -378,9 +391,12 @@ class AdaptiveTrader:
 
                 now = datetime.now(IST).strftime('%H:%M:%S')
                 stocks = ", ".join([p.symbol.split(".")[0].replace("^","") for p in self.positions]) or "none"
-                opts = f"{self.options_position['index_name']}{self.options_position['option_type']}" \
-                    if self.options_position else "none"
-                print(f"[{now}] Stocks:{stocks} | Options:{opts} | Capital:Rs.{self.capital:,.0f} | Daily:Rs.{self.daily_pnl:.0f}")
+                opts = " ".join([
+                    "{}{}".format(op['index_name'], op['option_type'])
+                    for op in self.options_positions
+                ]) or "none"
+                print("[{}] Stocks:{} | Options:{} | Capital:Rs.{:,.0f} | Daily:Rs.{:.0f}".format(
+                    now, stocks, opts, self.capital, self.daily_pnl))
                 time.sleep(self.scan_interval)
 
             except KeyboardInterrupt:

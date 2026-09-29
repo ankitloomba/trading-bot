@@ -26,9 +26,11 @@ INSTRUMENT_KEYS = {
 STARTING_CAPITAL = 5000
 MAX_POSITIONS = 3
 BUFFER_CASH = 500
-OPTIONS_CAPITAL = 2000
-OPTIONS_STOP_PCT = 0.40
-OPTIONS_TRAIL_PCT = 0.30
+OPTIONS_CAPITAL = 3000   # Per-trade options budget (up from 2000)
+OPTIONS_STOP_PCT = 0.40  # Hard stop: exit if premium down 40%
+OPTIONS_TRAIL_PCT = 0.30 # Trail stop: exit if 30% below peak
+OPTIONS_PROFIT_PCT = 2.0 # Profit target: exit if premium doubles (100% gain)
+OPTIONS_MAX_POSITIONS = 2  # Allow 2 concurrent options positions
 OPTIONS_ENABLED = True
 
 BREAKOUT_PERIODS = 15

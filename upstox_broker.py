@@ -50,7 +50,7 @@ class UpstoxBroker:
         try:
             payload = {
                 'quantity': quantity,
-                'product': 'D',  # Delivery for stocks (CNC)
+                'product': 'I',  # MIS — intraday (5x leverage, auto square-off 15:20)
                 'validity': 'DAY',
                 'price': price,
                 'tag': 'intragini',

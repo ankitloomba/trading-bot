@@ -1,9 +1,10 @@
 """
-Intra Gini 🔥 — Breakout Strategy
-With debug logging to show scores per symbol
+Intra Gini 🔥 — Breakout + Breakdown Strategy
+Returns BUY signal on bullish breakout, SELL signal on bearish breakdown.
 """
 import pandas as pd
 import numpy as np
+
 
 class BreakoutStrategy:
     def __init__(self):
@@ -21,51 +22,54 @@ class BreakoutStrategy:
         try:
             close = df['Close']
             high = df['High']
+            low = df['Low']
             volume = df['Volume']
 
-            score = 0
-            details = []
-
-            # 1. Breakout above 15-candle high (0-3 pts)
-            recent_high = high.iloc[-self.breakout_periods-1:-1].max()
             current_price = float(close.iloc[-1])
-            breakout_pct = (current_price - recent_high) / recent_high * 100
-
-            if breakout_pct > 0.5:
-                score += 3
-                details.append("Breakout +{:.2f}% ✅✅✅".format(breakout_pct))
-            elif breakout_pct > 0.2:
-                score += 2
-                details.append("Breakout +{:.2f}% ✅✅".format(breakout_pct))
-            elif breakout_pct > 0:
-                score += 1
-                details.append("Breakout +{:.2f}% ✅".format(breakout_pct))
-            else:
-                details.append("No breakout {:.2f}% ❌".format(breakout_pct))
-
-            # 2. RSI in range (0-2 pts)
             rsi = self.calculate_rsi(close)
             rsi_val = float(rsi.iloc[-1])
-            if 45 <= rsi_val <= 65:
-                score += 2
-                details.append("RSI {:.1f} ✅✅".format(rsi_val))
-            elif 40 <= rsi_val < 45 or 65 < rsi_val <= 70:
-                score += 1
-                details.append("RSI {:.1f} ✅".format(rsi_val))
+
+            # ──────────────────── BULLISH CHECK ────────────────────────
+            recent_high = high.iloc[-self.breakout_periods-1:-1].max()
+            breakout_pct = (current_price - recent_high) / recent_high * 100
+
+            bull_score = 0
+            bull_details = []
+
+            # 1. Breakout above 15-candle high (0-3 pts)
+            if breakout_pct > 0.5:
+                bull_score += 3
+                bull_details.append("Breakout +{:.2f}% ✅✅✅".format(breakout_pct))
+            elif breakout_pct > 0.2:
+                bull_score += 2
+                bull_details.append("Breakout +{:.2f}% ✅✅".format(breakout_pct))
+            elif breakout_pct > 0:
+                bull_score += 1
+                bull_details.append("Breakout +{:.2f}% ✅".format(breakout_pct))
             else:
-                details.append("RSI {:.1f} ❌".format(rsi_val))
+                bull_details.append("No breakout {:.2f}% ❌".format(breakout_pct))
+
+            # 2. RSI in bullish range (0-2 pts)
+            if 45 <= rsi_val <= 65:
+                bull_score += 2
+                bull_details.append("RSI {:.1f} ✅✅".format(rsi_val))
+            elif 40 <= rsi_val < 45 or 65 < rsi_val <= 70:
+                bull_score += 1
+                bull_details.append("RSI {:.1f} ✅".format(rsi_val))
+            else:
+                bull_details.append("RSI {:.1f} ❌".format(rsi_val))
 
             # 3. Last 3 candles green (0-2 pts)
             last3 = close.iloc[-3:].values
             green = sum(1 for i in range(1, len(last3)) if last3[i] > last3[i-1])
             if green >= 2:
-                score += 2
-                details.append("{}  green candles ✅✅".format(green))
+                bull_score += 2
+                bull_details.append("{} green candles ✅✅".format(green))
             elif green == 1:
-                score += 1
-                details.append("1 green candle ✅")
+                bull_score += 1
+                bull_details.append("1 green candle ✅")
             else:
-                details.append("No green candles ❌")
+                bull_details.append("No green candles ❌")
 
             # 4. Trading time bonus (0-2 pts)
             from datetime import datetime
@@ -73,37 +77,109 @@ class BreakoutStrategy:
             IST = pytz.timezone('Asia/Kolkata')
             now = datetime.now(IST)
             if 9 <= now.hour < 13:
-                score += 2
-                details.append("Prime time ✅✅")
+                bull_score += 2
+                bull_details.append("Prime time ✅✅")
+                bear_time_bonus = 2
             elif 13 <= now.hour < 14:
-                score += 1
-                details.append("Good time ✅")
+                bull_score += 1
+                bull_details.append("Good time ✅")
+                bear_time_bonus = 1
             else:
-                details.append("Late session ❌")
+                bull_details.append("Late session ❌")
+                bear_time_bonus = 0
 
             # 5. Volume spike (0-1 pt)
             avg_vol = volume.rolling(20).mean().iloc[-1]
             vol_ratio = float(volume.iloc[-1]) / float(avg_vol) if avg_vol > 0 else 0
             if vol_ratio >= 1.5:
-                score += 1
-                details.append("Volume {:.1f}x ✅".format(vol_ratio))
+                bull_score += 1
+                bull_details.append("Volume {:.1f}x ✅".format(vol_ratio))
             else:
-                details.append("Volume {:.1f}x ❌".format(vol_ratio))
+                bull_details.append("Volume {:.1f}x ❌".format(vol_ratio))
 
-            # Debug log
+            # ──────────────────── BEARISH CHECK ────────────────────────
+            recent_low = low.iloc[-self.breakout_periods-1:-1].min()
+            breakdown_pct = (recent_low - current_price) / recent_low * 100  # positive = broke down
+
+            bear_score = 0
+            bear_details = []
+
+            # 1. Breakdown below 15-candle low (0-3 pts)
+            if breakdown_pct > 0.5:
+                bear_score += 3
+                bear_details.append("Breakdown -{:.2f}% ✅✅✅".format(breakdown_pct))
+            elif breakdown_pct > 0.2:
+                bear_score += 2
+                bear_details.append("Breakdown -{:.2f}% ✅✅".format(breakdown_pct))
+            elif breakdown_pct > 0:
+                bear_score += 1
+                bear_details.append("Breakdown -{:.2f}% ✅".format(breakdown_pct))
+            else:
+                bear_details.append("No breakdown {:.2f}% ❌".format(-breakdown_pct))
+
+            # 2. RSI in bearish range (0-2 pts)
+            if 35 <= rsi_val <= 55:
+                bear_score += 2
+                bear_details.append("RSI {:.1f} bearish ✅✅".format(rsi_val))
+            elif 30 <= rsi_val < 35 or 55 < rsi_val <= 60:
+                bear_score += 1
+                bear_details.append("RSI {:.1f} bearish ✅".format(rsi_val))
+            else:
+                bear_details.append("RSI {:.1f} not bearish ❌".format(rsi_val))
+
+            # 3. Last 3 candles red (0-2 pts)
+            red = sum(1 for i in range(1, len(last3)) if last3[i] < last3[i-1])
+            if red >= 2:
+                bear_score += 2
+                bear_details.append("{} red candles ✅✅".format(red))
+            elif red == 1:
+                bear_score += 1
+                bear_details.append("1 red candle ✅")
+            else:
+                bear_details.append("No red candles ❌")
+
+            # 4. Time bonus (same as bull)
+            bear_score += bear_time_bonus
+            if bear_time_bonus == 2:
+                bear_details.append("Prime time ✅✅")
+            elif bear_time_bonus == 1:
+                bear_details.append("Good time ✅")
+            else:
+                bear_details.append("Late session ❌")
+
+            # 5. Volume spike (same as bull)
+            if vol_ratio >= 1.5:
+                bear_score += 1
+                bear_details.append("Volume {:.1f}x ✅".format(vol_ratio))
+            else:
+                bear_details.append("Volume {:.1f}x ❌".format(vol_ratio))
+
+            # ──────────────────── DEBUG + RETURN ───────────────────────
             if debug and symbol:
-                print("[SCAN] {} | Score:{}/10 | Price:{:.2f}".format(
-                    symbol.replace('.NS','').replace('^',''),
-                    score, current_price))
-                for d in details:
-                    print("       {}".format(d))
+                tag = symbol.replace('.NS', '').replace('^', '')
+                print("[SCAN] {} | Bull:{}/10 Break:{:.2f}% | Bear:{}/10 Down:{:.2f}% | Price:{:.2f}".format(
+                    tag, bull_score, breakout_pct, bear_score, breakdown_pct, current_price))
 
-            if score >= 5:
+            # Bullish wins if tied
+            if bull_score >= 5 and bull_score >= bear_score:
+                if debug and symbol:
+                    for d in bull_details:
+                        print("       [BUY] {}".format(d))
                 return {
-                    'score': score,
+                    'score': bull_score,
                     'price': current_price,
                     'type': 'BUY',
-                    'reasons': details
+                    'reasons': bull_details
+                }
+            elif bear_score >= 5 and bear_score > bull_score:
+                if debug and symbol:
+                    for d in bear_details:
+                        print("       [SELL] {}".format(d))
+                return {
+                    'score': bear_score,
+                    'price': current_price,
+                    'type': 'SELL',
+                    'reasons': bear_details
                 }
             return None
 
