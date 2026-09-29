@@ -44,21 +44,46 @@ class Position:
         self.entry_time = datetime.now(IST).strftime('%H:%M:%S')
         self.hard_stop = entry_price * (1 - params['stop_loss'])
         self.last_price = entry_price  # updated on each exit check
+        self._entry_dt = datetime.now(IST)  # for time stop
 
     def update_trailing(self, current_price):
         self.last_price = current_price
         self.highest_price = max(self.highest_price, current_price)
 
     def should_exit(self, current_price):
-        if self.params['use_trailing']:
-            trail_stop = self.highest_price * (1 - self.params['trail_pct'])
-            if current_price < trail_stop and self.highest_price > self.entry_price * 1.005:
+        import pytz
+        from datetime import datetime
+        IST = pytz.timezone('Asia/Kolkata')
+
+        pnl_pct = (current_price - self.entry_price) / self.entry_price
+        held_min = (datetime.now(IST) - self._entry_dt).seconds / 60 if hasattr(self, '_entry_dt') else 0
+
+        # 1. Profit target
+        if (current_price - self.entry_price) / self.entry_price >= self.params['profit_target']:
+            return True, 'PROFIT_TARGET'
+
+        # 2. Breakeven stop: once up 0.4%, move hard stop to entry
+        if self.highest_price >= self.entry_price * 1.004 and current_price <= self.entry_price:
+            return True, 'BREAKEVEN_STOP'
+
+        # 3. Trailing stop (tightens after strong move)
+        if self.params['use_trailing'] and self.highest_price > self.entry_price * 1.005:
+            trail_pct = self.params['trail_pct']
+            # Tighten trail if up >0.8%
+            if self.highest_price >= self.entry_price * 1.008:
+                trail_pct = trail_pct * 0.6
+            trail_stop = self.highest_price * (1 - trail_pct)
+            if current_price < trail_stop:
                 return True, 'TRAIL_STOP'
-        else:
-            if (current_price - self.entry_price) / self.entry_price >= self.params['profit_target']:
-                return True, 'PROFIT_TARGET'
+
+        # 4. Time stop: flat/losing after 40 min
+        if held_min >= 40 and pnl_pct < 0.002:
+            return True, 'TIME_STOP'
+
+        # 5. Hard stop
         if current_price <= self.hard_stop:
             return True, 'HARD_STOP'
+
         return False, None
 
 
@@ -245,6 +270,7 @@ class AdaptiveTrader:
                     pos = self.options_trader.buy_option(opt_symbol, signal['price'], sig_type)
                     if pos:
                         pos['index_symbol'] = opt_symbol
+                        pos['entry_time'] = datetime.now(IST)
                         self.options_positions.append(pos)
                         self.notifier.trade_open(
                             "{}-{}".format(pos['index_name'], opt_type),

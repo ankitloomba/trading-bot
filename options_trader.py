@@ -157,46 +157,76 @@ class MultiOptionsTrader:
 
     def should_exit_option(self, position):
         """
-        Exit rules:
-          1. Profit target  — premium doubles (100% gain)      → PROFIT_TARGET
-          2. Trailing stop  — drops 30% from peak after 10%up  → TRAIL_STOP
-          3. Hard stop      — drops 40% from entry             → HARD_STOP
+        Exit rules (in priority order):
+          1. Profit target   — premium doubles (100% gain)           → PROFIT_TARGET
+          2. Breakeven stop  — once up 25%, hard stop moves to entry → BREAKEVEN_STOP
+          3. Dynamic trail   — tightens as profit grows:
+                               >80% gain  → trail 10% from peak
+                               >50% gain  → trail 15% from peak
+                               >20% gain  → trail 20% from peak
+                               >10% gain  → trail 25% from peak
+          4. Time stop       — flat/losing after 25 min → exit       → TIME_STOP
+          5. Hard stop       — 25% loss from entry                   → HARD_STOP
         """
+        from datetime import datetime
+        import pytz
+        IST = pytz.timezone('Asia/Kolkata')
+
         current_premium = self.get_option_ltp(position['instrument_key'])
         if not current_premium:
             return False, None, 0
 
-        # Track peak
+        # Track peak and entry time
         if current_premium > position['highest_premium']:
             position['highest_premium'] = current_premium
+        if 'entry_time' not in position:
+            position['entry_time'] = datetime.now(IST)
 
         entry = position['entry_premium']
-        peak = position['highest_premium']
-        pnl = (current_premium - entry) * position['lot_size']
+        peak  = position['highest_premium']
+        pnl   = (current_premium - entry) * position['lot_size']
         pnl_pct = (current_premium - entry) / entry * 100
+        held_min = (datetime.now(IST) - position['entry_time']).seconds / 60
 
-        # 1. Profit target: premium doubled → take money
+        # 1. Profit target: premium doubled
         if current_premium >= entry * 2.0:
-            print("[OPTIONS] 🎯 PROFIT TARGET HIT! {:.1f}% gain | P&L: Rs.{:+.0f}".format(
-                pnl_pct, pnl))
+            print("[OPTIONS] 🎯 PROFIT TARGET! +{:.1f}% | P&L: Rs.{:+.0f}".format(pnl_pct, pnl))
             return True, 'PROFIT_TARGET', pnl
 
-        # 2. Trailing stop: fell 30% from peak (only after peak is 10% above entry)
-        trail_stop = peak * 0.70
-        if current_premium < trail_stop and peak > entry * 1.10:
-            print("[OPTIONS] 📉 TRAIL_STOP | Premium Rs.{:.2f} below trail Rs.{:.2f}".format(
-                current_premium, trail_stop))
-            return True, 'TRAIL_STOP', pnl
+        # 2. Breakeven stop: once up 25%, never let it go below entry
+        if peak >= entry * 1.25 and current_premium <= entry:
+            print("[OPTIONS] 🔒 BREAKEVEN_STOP | Was up, now back to entry | P&L: Rs.{:+.0f}".format(pnl))
+            return True, 'BREAKEVEN_STOP', pnl
 
-        # 3. Hard stop: 40% loss
-        if current_premium < entry * 0.60:
-            print("[OPTIONS] 🛑 HARD_STOP | Premium Rs.{:.2f} | Loss: Rs.{:.0f}".format(
-                current_premium, pnl))
+        # 3. Dynamic trailing stop — tightens as profit grows
+        if peak > entry * 1.10:
+            if pnl_pct >= 80:
+                trail_floor = peak * 0.90   # keep 90% of peak
+            elif pnl_pct >= 50:
+                trail_floor = peak * 0.85
+            elif pnl_pct >= 20:
+                trail_floor = peak * 0.80
+            else:
+                trail_floor = peak * 0.75   # default 25% trail
+            if current_premium < trail_floor:
+                print("[OPTIONS] 📉 TRAIL_STOP | Rs.{:.2f} < floor Rs.{:.2f} | P&L: Rs.{:+.0f}".format(
+                    current_premium, trail_floor, pnl))
+                return True, 'TRAIL_STOP', pnl
+
+        # 4. Time stop: held 25+ min and still a loser or barely moving
+        if held_min >= 25 and pnl_pct < 10:
+            print("[OPTIONS] ⏱ TIME_STOP | {:.0f}min held, only {:.1f}% gain | P&L: Rs.{:+.0f}".format(
+                held_min, pnl_pct, pnl))
+            return True, 'TIME_STOP', pnl
+
+        # 5. Hard stop: 25% loss (tighter than before)
+        if current_premium < entry * 0.75:
+            print("[OPTIONS] 🛑 HARD_STOP | Rs.{:.2f} | Loss: Rs.{:.0f}".format(current_premium, pnl))
             return True, 'HARD_STOP', pnl
 
-        print("[OPTIONS] Holding {}-{} | Rs.{:.2f} | P&L: {:+.1f}% (Rs.{:+.0f})".format(
+        print("[OPTIONS] Holding {}-{} | Rs.{:.2f} | {:+.1f}% (Rs.{:+.0f}) | {:.0f}min".format(
             position['index_name'], position['option_type'],
-            current_premium, pnl_pct, pnl))
+            current_premium, pnl_pct, pnl, held_min))
         return False, None, 0
 
     def sell_option(self, position):
