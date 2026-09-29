@@ -321,7 +321,7 @@ class AdaptiveTrader:
             now = datetime.now(IST).strftime('%H:%M:%S')
             pos.update_trailing(current_price)
             exit_trade, reason = pos.should_exit(current_price)
-            force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 15)
+            force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 10)
 
             if exit_trade or force_exit:
                 reason = reason or 'TIME_EXIT'
