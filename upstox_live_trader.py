@@ -415,18 +415,28 @@ class AdaptiveTrader:
 
     def check_exits(self):
         to_remove = []
+        force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 10)
         for pos in self.positions:
-            df = self.get_live_data(pos.symbol)
-            if df is None:
-                continue
-            current_price = float(df['Close'].values.flatten()[-1])
-            now = datetime.now(IST).strftime('%H:%M:%S')
-            pos.update_trailing(current_price)
-            exit_trade, reason = pos.should_exit(current_price)
-            force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 10)
+            try:
+                now = datetime.now(IST).strftime('%H:%M:%S')
 
-            if exit_trade or force_exit:
-                reason = reason or 'TIME_EXIT'
+                # If force_exit time (3:10 PM+) and we can't get fresh data,
+                # still sell using last known price — never skip a forced close.
+                df = self.get_live_data(pos.symbol)
+                if df is None:
+                    if force_exit:
+                        current_price = pos.last_price  # use last known price
+                        reason = 'TIME_EXIT'
+                        print(f"[{now}] FORCE SELL {pos.symbol} (no data, using last price Rs.{current_price:.2f})")
+                    else:
+                        continue  # not force_exit — wait for next scan
+                else:
+                    current_price = float(df['Close'].values.flatten()[-1])
+                    pos.update_trailing(current_price)
+                    exit_trade, reason = pos.should_exit(current_price)
+                    if not exit_trade and not force_exit:
+                        continue
+                    reason = reason or 'TIME_EXIT'
 
                 # Place REAL sell order
                 if self.broker and pos.broker_pos:
@@ -460,6 +470,9 @@ class AdaptiveTrader:
                     print("\nDAILY LOSS LIMIT HIT - Stopping")
                     self.print_summary()
                     exit(0)
+
+            except Exception as e:
+                print(f"[EXIT] Error checking {pos.symbol}: {e} — skipping this position")
 
         for pos in to_remove:
             self.positions.remove(pos)

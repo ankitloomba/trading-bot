@@ -669,6 +669,7 @@ def auto_login():
             if token:
                 ACCESS_TOKEN = token
                 os.environ['UPSTOX_ACCESS_TOKEN'] = token
+                persist_token(token)
                 _fire_token_callbacks(token)
                 print("[AUTH] Auto-login successful!")
                 return True
@@ -679,6 +680,30 @@ def auto_login():
     except Exception as e:
         print(f"[AUTH] Auto-login error: {e}")
         return False
+
+TOKEN_FILE = '/tmp/upstox_token.txt'
+
+def persist_token(token):
+    """Write token to file so process restarts can recover it without re-login."""
+    try:
+        with open(TOKEN_FILE, 'w') as f:
+            f.write(token)
+        print("[AUTH] Token saved to disk (survives process restarts)")
+    except Exception as e:
+        print(f"[AUTH] Could not save token: {e}")
+
+def load_persisted_token():
+    """Read previously saved token from disk."""
+    try:
+        if os.path.exists(TOKEN_FILE):
+            with open(TOKEN_FILE) as f:
+                token = f.read().strip()
+            if token:
+                print("[AUTH] Loaded saved token from disk — no re-login needed")
+                return token
+    except Exception as e:
+        print(f"[AUTH] Could not load saved token: {e}")
+    return None
 
 def exchange_code(auth_code):
     global ACCESS_TOKEN
@@ -859,6 +884,7 @@ class AuthHandler(BaseHTTPRequestHandler):
             if token:
                 ACCESS_TOKEN = token
                 os.environ['UPSTOX_ACCESS_TOKEN'] = token
+                persist_token(token)
                 _fire_token_callbacks(token)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html')
@@ -900,6 +926,19 @@ def start_auth_server():
     server.serve_forever()
 
 def run_in_background():
+    global ACCESS_TOKEN
+
+    # ── Token recovery after crash/restart ──────────────────────────────
+    # On a process restart within the same container, /tmp/upstox_token.txt
+    # still exists. Load it immediately so the bot can resume without re-login.
+    saved = load_persisted_token()
+    if saved and not ACCESS_TOKEN:
+        ACCESS_TOKEN = saved
+        os.environ['UPSTOX_ACCESS_TOKEN'] = saved
+        print("[AUTH] ✅ Resumed from saved token — firing callbacks")
+        # Fire callbacks in a thread so the server hasn't started yet
+        threading.Thread(target=lambda: _fire_token_callbacks(saved), daemon=True).start()
+
     # Try auto-login first if TOTP available
     if TOTP_SECRET:
         threading.Thread(target=auto_login, daemon=True).start()
