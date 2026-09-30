@@ -8,7 +8,7 @@ import numpy as np
 
 class BreakoutStrategy:
     def __init__(self):
-        self.breakout_periods = 15
+        self.breakout_periods = 10   # Shorter lookback = more breakout opportunities
         self.rsi_period = 14
 
     def calculate_rsi(self, series, period=14):
@@ -36,11 +36,11 @@ class BreakoutStrategy:
             bull_score = 0
             bull_details = []
 
-            # 1. Breakout above 15-candle high (0-3 pts)
-            if breakout_pct > 0.5:
+            # 1. Breakout above 10-candle high (0-3 pts)
+            if breakout_pct > 0.3:
                 bull_score += 3
                 bull_details.append("Breakout +{:.2f}% ✅✅✅".format(breakout_pct))
-            elif breakout_pct > 0.2:
+            elif breakout_pct > 0.1:
                 bull_score += 2
                 bull_details.append("Breakout +{:.2f}% ✅✅".format(breakout_pct))
             elif breakout_pct > 0:
@@ -91,7 +91,7 @@ class BreakoutStrategy:
             # 5. Volume spike (0-1 pt)
             avg_vol = volume.rolling(20).mean().iloc[-1]
             vol_ratio = float(volume.iloc[-1]) / float(avg_vol) if avg_vol > 0 else 0
-            if vol_ratio >= 1.5:
+            if vol_ratio >= 1.2:
                 bull_score += 1
                 bull_details.append("Volume {:.1f}x ✅".format(vol_ratio))
             else:
@@ -104,11 +104,11 @@ class BreakoutStrategy:
             bear_score = 0
             bear_details = []
 
-            # 1. Breakdown below 15-candle low (0-3 pts)
-            if breakdown_pct > 0.5:
+            # 1. Breakdown below 10-candle low (0-3 pts)
+            if breakdown_pct > 0.3:
                 bear_score += 3
                 bear_details.append("Breakdown -{:.2f}% ✅✅✅".format(breakdown_pct))
-            elif breakdown_pct > 0.2:
+            elif breakdown_pct > 0.1:
                 bear_score += 2
                 bear_details.append("Breakdown -{:.2f}% ✅✅".format(breakdown_pct))
             elif breakdown_pct > 0:
@@ -148,7 +148,7 @@ class BreakoutStrategy:
                 bear_details.append("Late session ❌")
 
             # 5. Volume spike (same as bull)
-            if vol_ratio >= 1.5:
+            if vol_ratio >= 1.2:
                 bear_score += 1
                 bear_details.append("Volume {:.1f}x ✅".format(vol_ratio))
             else:

@@ -125,13 +125,12 @@ class AdaptiveTrader:
             for p in self.positions
         )
 
+    def print_header(self):
         print("\n" + "="*60)
         print(f"  {BOT_NAME} {BOT_EMOJI} - MULTI-SYMBOL + OPTIONS TRADER")
         print("="*60)
         print(f"Capital:   Rs.{self.capital:,.0f}")
         print(f"Symbols:   {len(self.symbols)}")
-        for s in self.symbols:
-            print(f"  - {s}")
         print(f"Options:   Bank Nifty + Nifty + NiftyIT CE/PE")
         print(f"Min score: {self.min_score}/10")
         print(f"Interval:  {self.scan_interval}s")
@@ -403,6 +402,7 @@ class AdaptiveTrader:
         self.notifier.daily_summary(self.daily_trades, self.capital, self.start_capital)
 
     def run(self):
+        self.print_header()
         self.notifier.market_open(self.capital, 'A+B')
         print(f"\nScanning {len(self.symbols)} symbols + options every {self.scan_interval}s...")
         while True:
