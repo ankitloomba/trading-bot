@@ -304,7 +304,7 @@ class AuthHandler(BaseHTTPRequestHandler):
 
         # Show login page
         self.send_response(200)
-        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.end_headers()
         status = "LOGGED IN ✅" if ACCESS_TOKEN else "WAITING FOR LOGIN"
         color = "#22c55e" if ACCESS_TOKEN else "#f97316"

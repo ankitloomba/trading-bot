@@ -75,11 +75,12 @@ class UpstoxBroker:
             res = requests.get(
                 f"{BASE_URL}/market-quote/ltp",
                 headers=self.headers,
-                params={'symbol': instrument_key}
+                params={'instrument_key': instrument_key}  # Upstox v2 uses instrument_key, not symbol
             )
             data = res.json()
             if data.get('status') == 'success':
                 return float(list(data['data'].values())[0]['last_price'])
+            print(f"[BROKER] LTP API error: {data.get('errors', data)}")
             return None
         except Exception as e:
             print(f"[BROKER] LTP error: {e}")
