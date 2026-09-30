@@ -40,6 +40,103 @@ _live_state = {
 def update_live_state(**kwargs):
     _live_state.update(kwargs)
 
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f0f0f">
+<title>Intra Gini \U0001f525</title>
+<link rel="manifest" href="/manifest.json">
+<style>
+  :root { --bg:#0f0f0f;--card:#1a1a1a;--border:#2a2a2a;--text:#f0f0f0;--muted:#6b7280;--green:#22c55e;--red:#ef4444;--orange:#f97316;--purple:#a855f7;--blue:#3b82f6; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
+  header{padding:20px 16px 12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)}
+  header h1{font-size:20px;font-weight:700}
+  .badge{font-size:11px;padding:3px 8px;border-radius:20px;font-weight:600}
+  .badge.live{background:#166534;color:var(--green)}.badge.closed{background:#1c1c1c;color:var(--muted)}.badge.starting{background:#7c2d12;color:var(--orange)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:16px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:16px}
+  .card.full{grid-column:1/-1}
+  .card label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px}
+  .card .val{font-size:26px;font-weight:700}.card .val.green{color:var(--green)}.card .val.red{color:var(--red)}.card .val.muted{color:var(--muted);font-size:18px}
+  .section{padding:0 16px 16px}.section h2{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+  .pos-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+  .pos-name{font-weight:600;font-size:15px}.pos-sub{font-size:12px;color:var(--muted);margin-top:2px}
+  .pos-pnl{text-align:right}.pos-pnl .amt{font-size:17px;font-weight:700}.pos-pnl .pct{font-size:12px;color:var(--muted)}
+  .trade-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)}
+  .trade-row:last-child{border-bottom:none}
+  .trade-sym{font-weight:600;font-size:14px}.trade-meta{font-size:11px;color:var(--muted);margin-top:2px}
+  .trade-pnl{font-weight:700;font-size:15px}.trade-reason{font-size:10px;color:var(--muted);margin-top:2px;text-align:right}
+  .empty{text-align:center;color:var(--muted);padding:24px;font-size:14px}
+  .refresh-bar{text-align:center;padding:12px;font-size:11px;color:var(--muted)}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:5px;animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  footer{text-align:center;padding:20px;font-size:11px;color:#333}
+</style>
+</head>
+<body>
+<header>
+  <h1>\U0001f525 Intra Gini</h1>
+  <span class="badge starting" id="status-badge">STARTING</span>
+</header>
+<div class="grid">
+  <div class="card"><label>Capital</label><div class="val" id="capital">—</div></div>
+  <div class="card"><label>Today's P&amp;L</label><div class="val" id="daily-pnl">—</div></div>
+</div>
+<div class="section">
+  <h2>Active Positions</h2>
+  <div id="positions"><div class="empty">No open positions</div></div>
+</div>
+<div class="section">
+  <h2>Options</h2>
+  <div id="options"><div class="empty">No options open</div></div>
+</div>
+<div class="section">
+  <h2>Today's Trades</h2>
+  <div class="card full" style="padding:4px 14px">
+    <div id="trades"><div class="empty" style="padding:16px">Loading...</div></div>
+  </div>
+</div>
+<div class="refresh-bar"><span class="dot"></span><span id="last-update">Updating...</span></div>
+<footer>Intra Gini \xb7 Auto-refreshes every 30s</footer>
+<script>
+function fmt(n){if(n===null||n===undefined)return'—';const a=Math.abs(n);return(n>=0?'+':'−')+'₹'+a.toLocaleString('en-IN',{minimumFractionDigits:0,maximumFractionDigits:0})}
+function fmtP(n){return'₹'+Number(n).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2})}
+function color(n){return n>=0?'green':'red'}
+async function fetchStatus(){
+  try{
+    const d=await(await fetch('/api/status')).json();
+    const b=document.getElementById('status-badge');
+    b.textContent=d.status;b.className='badge '+(d.status==='LIVE'?'live':d.status==='MARKET_CLOSED'?'closed':'starting');
+    document.getElementById('capital').textContent=d.capital?'₹'+Number(d.capital).toLocaleString('en-IN'):'—';
+    const p=document.getElementById('daily-pnl');
+    p.textContent=d.daily_pnl!==undefined?fmt(d.daily_pnl):'—';
+    p.className='val '+(d.daily_pnl>=0?'green':'red');
+    const pos=document.getElementById('positions');
+    if(!d.positions||!d.positions.length){pos.innerHTML='<div class="empty">No open positions</div>';}
+    else pos.innerHTML=d.positions.map(p=>`<div class="pos-card"><div><div class="pos-name">${p.symbol.replace('.NS','').replace('^','')}</div><div class="pos-sub">Entry: ${fmtP(p.entry_price)}</div></div><div class="pos-pnl"><div class="amt ${color(p.pnl)}">${fmt(p.pnl)}</div><div class="pct">${p.pnl_pct>=0?'+':''}${Number(p.pnl_pct).toFixed(2)}%</div></div></div>`).join('');
+    const opt=document.getElementById('options');
+    if(!d.options||!d.options.length){opt.innerHTML='<div class="empty">No options open</div>';}
+    else opt.innerHTML=d.options.map(o=>`<div class="pos-card"><div><div class="pos-name">${o.name} @ ₹${o.strike}</div><div class="pos-sub">Entry: ₹${o.entry_premium} \xb7 Peak: ₹${o.peak_premium}</div></div><div class="pos-pnl"><div class="amt ${color(o.pnl)}">${fmt(o.pnl)}</div></div></div>`).join('');
+    document.getElementById('last-update').textContent='Last scan: '+(d.last_scan||'—');
+  }catch(e){document.getElementById('status-badge').textContent='OFFLINE';document.getElementById('status-badge').className='badge closed';}
+}
+async function fetchTrades(){
+  try{
+    const d=await(await fetch('/api/trades')).json();
+    const el=document.getElementById('trades');
+    if(!d.trades||!d.trades.length){el.innerHTML='<div class="empty" style="padding:16px">No trades today yet</div>';return;}
+    el.innerHTML=d.trades.map(t=>`<div class="trade-row"><div><div class="trade-sym">${(t.symbol||'').replace('.NS','')}</div><div class="trade-meta">${t.entry_time||''} → ${t.exit_time||''}</div></div><div><div class="trade-pnl ${color(t.pnl)}">${fmt(t.pnl)}</div><div class="trade-reason">${t.reason||''}</div></div></div>`).join('');
+  }catch(e){}
+}
+async function refresh(){await Promise.all([fetchStatus(),fetchTrades()]);}
+refresh();setInterval(refresh,30000);
+</script>
+</body>
+</html>"""
+
 def on_token(callback):
     """Register a callback to be called when token is obtained."""
     _token_callbacks.append(callback)
@@ -258,24 +355,27 @@ class AuthHandler(BaseHTTPRequestHandler):
                 _json_response(self, {'error': str(e)}, 500)
             return
 
-        # ── Dashboard static files ─────────────────────────
-        import os as _os
-        dashboard_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'dashboard')
-        if path == '/' or path == '/dashboard' or path == '/dashboard/':
-            file_path = _os.path.join(dashboard_dir, 'index.html')
-            content_type = 'text/html'
-        elif path == '/manifest.json':
-            file_path = _os.path.join(dashboard_dir, 'manifest.json')
-            content_type = 'application/json'
-        else:
-            file_path = None
-            content_type = None
-
-        if file_path and _os.path.exists(file_path):
-            with open(file_path, 'rb') as f:
-                body = f.read()
+        # ── Dashboard (inlined so Railway filesystem path doesn't matter) ──
+        if path == '/dashboard' or path == '/dashboard/':
+            body = DASHBOARD_HTML.encode('utf-8')
             self.send_response(200)
-            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/manifest.json':
+            import json as _json
+            body = _json.dumps({
+                "name": "Intra Gini", "short_name": "IntraGini",
+                "description": "Live trading dashboard",
+                "start_url": "/dashboard", "display": "standalone",
+                "background_color": "#0f0f0f", "theme_color": "#0f0f0f",
+                "icons": []
+            }).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
