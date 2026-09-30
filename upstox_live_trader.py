@@ -149,14 +149,85 @@ class AdaptiveTrader:
         if BROKER_AVAILABLE and token:
             self.broker = UpstoxBroker(token)
             print("[BROKER] ✅ Real stock orders enabled!")
-            # Check funds
+            # Pull real available funds and update capital display immediately
             funds = self.broker.get_funds()
             if funds:
+                self.capital = funds
                 print(f"[BROKER] Available funds: Rs.{funds:,.2f}")
+            # Sync any positions already open on Upstox (e.g. after redeploy)
+            self._sync_positions_from_broker()
 
         if OPTIONS_AVAILABLE and token:
             self.options_trader = MultiOptionsTrader(token)
             print("[OPTIONS] ✅ Options trader ready!")
+
+        # Push initial state to dashboard right after login
+        try:
+            import upstox_auth
+            upstox_auth.update_live_state(
+                status='LIVE',
+                capital=self.capital,
+                daily_pnl=self.daily_pnl,
+                positions=[],
+                options=[],
+                last_scan='just logged in',
+            )
+        except Exception:
+            pass
+
+    def _sync_positions_from_broker(self):
+        """Pull open MIS positions from Upstox and rebuild self.positions.
+        Called on login/redeploy so the bot doesn't forget about live trades."""
+        if not self.broker:
+            return
+        try:
+            raw = self.broker.get_positions()
+            synced = 0
+            for p in raw:
+                qty = int(p.get('quantity', 0))
+                if qty <= 0:
+                    continue  # already flat / short — skip
+                ikey = p.get('instrument_token', '')
+                # Find our symbol from instrument key
+                from config import INSTRUMENT_KEYS
+                symbol = next((s for s, k in INSTRUMENT_KEYS.items() if k == ikey), None)
+                if not symbol:
+                    # Try matching by tradingsymbol
+                    ts = p.get('tradingsymbol', '')
+                    from upstox_broker import STOCK_INSTRUMENTS
+                    symbol = next((s+'.NS' for s, k in STOCK_INSTRUMENTS.items()
+                                   if ts.startswith(s)), None)
+                if not symbol:
+                    continue
+                # Skip if already tracking this symbol
+                if any(pos.symbol == symbol for pos in self.positions):
+                    continue
+                entry = float(p.get('average_price', 0) or 0)
+                ltp   = float(p.get('last_price', entry) or entry)
+                cost  = entry * qty
+                variant = self.ab_test.get_variant_for_trade() if AB_TEST_ENABLED else 'A'
+                params  = self.ab_test.get_params(variant)
+                from upstox_broker import STOCK_INSTRUMENTS
+                ts = p.get('tradingsymbol', '')
+                broker_pos = {
+                    'order_id': p.get('order_id', ''),
+                    'stock': ts,
+                    'instrument_key': ikey,
+                    'quantity': qty,
+                    'entry_price': entry,
+                    'capital': cost,
+                }
+                pos = Position(symbol, entry, cost, 6, variant, params, broker_pos)
+                pos.last_price = ltp
+                self.positions.append(pos)
+                synced += 1
+                print(f"[SYNC] Restored {symbol} | {qty} shares @ Rs.{entry:.2f} | LTP Rs.{ltp:.2f}")
+            if synced:
+                print(f"[SYNC] ✅ {synced} position(s) restored from Upstox")
+            else:
+                print("[SYNC] No open positions on Upstox")
+        except Exception as e:
+            print(f"[SYNC] Error syncing positions: {e}")
 
     def is_market_open(self):
         now = datetime.now(IST)
@@ -437,9 +508,9 @@ class AdaptiveTrader:
                         {
                             'symbol':        p.symbol,
                             'entry_price':   p.entry_price,
-                            'current_price': getattr(p, 'current_price', p.entry_price),
-                            'pnl':           getattr(p, 'unrealized_pnl', 0),
-                            'pnl_pct':       getattr(p, 'unrealized_pnl_pct', 0),
+                            'current_price': p.last_price,
+                            'pnl':           (p.last_price - p.entry_price) / p.entry_price * p.capital,
+                            'pnl_pct':       (p.last_price - p.entry_price) / p.entry_price * 100,
                         } for p in self.positions
                     ]
                     upstox_auth.update_live_state(

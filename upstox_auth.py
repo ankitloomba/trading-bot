@@ -30,7 +30,7 @@ _token_callbacks = []
 # Live state updated by trader every scan cycle
 _live_state = {
     'status': 'STARTING',
-    'capital': 0,
+    'capital': float(os.environ.get('STARTING_CAPITAL', 5000)),
     'daily_pnl': 0,
     'positions': [],
     'options': [],

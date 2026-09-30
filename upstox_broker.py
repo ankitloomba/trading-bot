@@ -172,3 +172,19 @@ class UpstoxBroker:
         except Exception as e:
             print(f"[BROKER] Funds error: {e}")
             return None
+
+    def get_positions(self):
+        """Get open intraday (MIS) positions from Upstox — used to resync after redeploy."""
+        try:
+            res = requests.get(
+                f"{BASE_URL}/portfolio/short-term-positions",
+                headers=self.headers
+            )
+            data = res.json()
+            if data.get('status') == 'success':
+                return data.get('data', [])
+            print(f"[BROKER] Positions error: {data.get('errors', data)}")
+            return []
+        except Exception as e:
+            print(f"[BROKER] Positions error: {e}")
+            return []
