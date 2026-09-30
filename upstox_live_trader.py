@@ -58,8 +58,9 @@ class Position:
         pnl_pct = (current_price - self.entry_price) / self.entry_price
         held_min = (datetime.now(IST) - self._entry_dt).seconds / 60 if hasattr(self, '_entry_dt') else 0
 
-        # 1. Profit target
-        if (current_price - self.entry_price) / self.entry_price >= self.params['profit_target']:
+        # 1. Profit target (None for Variant A — trailing stop only, skip this check)
+        if self.params['profit_target'] is not None and \
+                (current_price - self.entry_price) / self.entry_price >= self.params['profit_target']:
             return True, 'PROFIT_TARGET'
 
         # 2. Breakeven stop: once up 0.4%, move hard stop to entry

@@ -11,6 +11,7 @@ import os
 import requests
 from datetime import datetime, timedelta
 import pytz
+from config import OPTIONS_CAPITAL
 
 IST = pytz.timezone('Asia/Kolkata')
 
@@ -26,7 +27,7 @@ class MultiOptionsTrader:
     def __init__(self, broker_token):
         self.token = broker_token
         self.base_url = "https://api.upstox.com/v2"
-        self.options_capital = 3000  # Per trade capital
+        self.options_capital = OPTIONS_CAPITAL  # Per trade capital (from config.py)
         self.headers = {
             'Authorization': 'Bearer {}'.format(self.token),
             'Accept': 'application/json',
@@ -87,7 +88,7 @@ class MultiOptionsTrader:
             res = requests.get(
                 "{}/market-quote/ltp".format(self.base_url),
                 headers=self.headers,
-                params={'symbol': instrument_key}
+                params={'instrument_key': instrument_key}
             )
             data = res.json()
             if data.get('status') == 'success':
