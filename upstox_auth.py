@@ -693,14 +693,25 @@ def persist_token(token):
         print(f"[AUTH] Could not save token: {e}")
 
 def load_persisted_token():
-    """Read previously saved token from disk."""
+    """Read previously saved token from disk and validate it still works."""
     try:
         if os.path.exists(TOKEN_FILE):
             with open(TOKEN_FILE) as f:
                 token = f.read().strip()
-            if token:
+            if not token:
+                return None
+            # Quick validation: hit the profile endpoint
+            r = requests.get(
+                f"{BASE_URL}/user/get-funds-and-margin",
+                headers={'Authorization': f'Bearer {token}', 'Accept': 'application/json'},
+                timeout=5
+            )
+            if r.json().get('status') == 'success':
                 print("[AUTH] Loaded saved token from disk — no re-login needed")
                 return token
+            else:
+                print("[AUTH] Saved token expired — removing, need fresh login")
+                os.remove(TOKEN_FILE)
     except Exception as e:
         print(f"[AUTH] Could not load saved token: {e}")
     return None

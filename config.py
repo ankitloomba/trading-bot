@@ -50,7 +50,8 @@ SYMBOLS = [
 ]
 
 # Options - which indices to trade options on
-OPTIONS_SYMBOLS = ["^NSEBANK", "^NSEI", "^CNXIT"]
+# Note: CNXIT (Nifty IT) uses monthly expiry — removed until we add monthly expiry logic
+OPTIONS_SYMBOLS = ["^NSEBANK", "^NSEI"]
 
 # Upstox instrument keys — maps Yahoo-style tickers to Upstox API keys
 INSTRUMENT_KEYS = {

@@ -305,27 +305,38 @@ class AdaptiveTrader:
         force_exit = (datetime.now(IST).hour >= 15 and datetime.now(IST).minute >= 10)
         to_close = []
         for opt_pos in self.options_positions:
-            exit_trade, reason, pnl = self.options_trader.should_exit_option(opt_pos)
-            if exit_trade or force_exit:
-                reason = reason or 'TIME_EXIT'
-                self.options_trader.sell_option(opt_pos)
-                actual_pnl = pnl if pnl != 0 else 0
-                self.capital += actual_pnl
-                self.daily_pnl += actual_pnl
-                icon = "WIN" if actual_pnl >= 0 else "LOSS"
-                label = "{}-{}".format(opt_pos['index_name'], opt_pos['option_type'])
-                print("\n[{}] OPTIONS {} | {} | P&L: Rs.{:+.2f} | {}".format(
-                    now_str, icon, label, actual_pnl, reason))
-                self.notifier.trade_close(
-                    label, opt_pos['entry_premium'], opt_pos['entry_premium'],
-                    actual_pnl, reason, self.capital)
-                to_close.append(opt_pos)
+            try:
+                exit_trade, reason, pnl = self.options_trader.should_exit_option(opt_pos)
+                if exit_trade or force_exit:
+                    reason = reason or 'TIME_EXIT'
+                    self.options_trader.sell_option(opt_pos)
+                    actual_pnl = pnl if pnl != 0 else 0
+                    self.capital += actual_pnl
+                    self.daily_pnl += actual_pnl
+                    icon = "WIN" if actual_pnl >= 0 else "LOSS"
+                    label = "{}-{}".format(opt_pos['index_name'], opt_pos['option_type'])
+                    # current premium = entry + pnl_per_unit; fall back to entry if unknown
+                    lot = opt_pos.get('lot_size', 1)
+                    exit_premium = opt_pos['entry_premium'] + (actual_pnl / lot if lot else 0)
+                    print("\n[{}] OPTIONS {} | {} | P&L: Rs.{:+.2f} | {}".format(
+                        now_str, icon, label, actual_pnl, reason))
+                    self.notifier.trade_close(
+                        label, opt_pos['entry_premium'], exit_premium,
+                        actual_pnl, reason, self.capital)
+                    to_close.append(opt_pos)
+            except Exception as e:
+                print(f"[OPTIONS EXIT] Error on {opt_pos.get('index_name','?')}: {e}")
         for op in to_close:
             self.options_positions.remove(op)
 
         # Enter new options positions (up to OPTIONS_MAX_POSITIONS = 2)
+        # Only enter options between 9:20am-1:30pm — avoid theta bleed in final hours
+        now_ist = datetime.now(IST)
+        opts_entry_open = now_ist.hour > 9 or (now_ist.hour == 9 and now_ist.minute >= 20)
+        opts_entry_close = now_ist.hour < 13 or (now_ist.hour == 13 and now_ist.minute <= 30)
         max_opts = getattr(self, '_opts_max', 2)
-        if (len(self.options_positions) < max_opts and self.is_trading_time() and
+        if (len(self.options_positions) < max_opts and self.is_market_open() and
+                opts_entry_open and opts_entry_close and
                 self.capital - BUFFER_CASH - OPTIONS_CAPITAL > 0):
             active_opt_symbols = [op['index_symbol'] for op in self.options_positions]
             for opt_symbol in OPTIONS_SYMBOLS:
@@ -372,7 +383,8 @@ class AdaptiveTrader:
             if df is None or len(df) < BREAKOUT_PERIODS + 2:
                 continue
             signal = self.strategy.get_signal(df, symbol=symbol, debug=True)
-            if signal and signal['score'] >= self.min_score:
+            # Only enter on BUY signals — we can't short stocks (MIS long only)
+            if signal and signal['score'] >= self.min_score and signal['type'] == 'BUY':
                 signals.append((symbol, signal))
 
         if not signals:
@@ -497,6 +509,15 @@ class AdaptiveTrader:
                     if now.hour >= 15 and now.minute >= 30:
                         print("\nMarket closed.")
                         self.print_summary()
+                        # Clear saved token — Upstox tokens expire daily,
+                        # stale token would cause silent failures tomorrow morning
+                        try:
+                            import upstox_auth
+                            if os.path.exists(upstox_auth.TOKEN_FILE):
+                                os.remove(upstox_auth.TOKEN_FILE)
+                                print("[AUTH] Cleared expired token file — re-login required tomorrow")
+                        except Exception:
+                            pass
                         break
                     time.sleep(60)
                     continue
